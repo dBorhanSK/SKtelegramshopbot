@@ -3,9 +3,22 @@ from bot import bot
 from config import BASE_URL, WEBHOOK_SECRET, ADMIN_PASSWORD
 from services import stats, is_admin
 from db import table
+import os
+import traceback
 
 app = Flask(__name__)
-app.secret_key = WEBHOOK_SECRET
+app.secret_key = WEBHOOK_SECRET or "dev-secret"
+
+def ensure_webhook():
+    if not BASE_URL:
+        print("Webhook skipped: BASE_URL is empty")
+        return
+    try:
+        url = f"{BASE_URL}/telegram-webhook"
+        result = bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET)
+        print("Webhook set:", url, result)
+    except Exception as e:
+        print("Webhook setup:", e)
 
 @app.get("/")
 def home():
@@ -17,14 +30,20 @@ def health():
 
 @app.post("/telegram-webhook")
 def telegram_webhook():
-    # Optional secret check. Telegram's secret header is set when webhook is configured.
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if WEBHOOK_SECRET and secret and secret != WEBHOOK_SECRET:
+        print("webhook forbidden: secret mismatch")
         return "forbidden", 403
     update = request.get_json(force=True, silent=True)
-    if update:
+    if not update:
+        print("webhook: empty body")
+        return "OK", 200
+    try:
         from telebot.types import Update
+        print("webhook update:", update.get("update_id"), list(update.keys()))
         bot.process_new_updates([Update.de_json(update)])
+    except Exception:
+        traceback.print_exc()
     return "OK", 200
 
 @app.get("/admin")
@@ -89,10 +108,8 @@ def set_webhook():
     result=bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET)
     return jsonify({"webhook":url,"result":result})
 
+ensure_webhook()
+
 if __name__=="__main__":
-    if BASE_URL:
-        try:
-            bot.set_webhook(url=f"{BASE_URL}/telegram-webhook", secret_token=WEBHOOK_SECRET)
-        except Exception as e:
-            print("Webhook setup:",e)
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
