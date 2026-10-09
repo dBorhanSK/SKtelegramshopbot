@@ -15,7 +15,10 @@ def get_user(tg_user):
         "points": 0,
         "role": "user",
     }
-    return table("users").insert(payload).execute().data[0]
+    res = table("users").insert(payload).execute()
+    if not res.data:
+        raise RuntimeError("users insert returned no row. Use the Supabase service_role key and run schema.sql.")
+    return res.data[0]
 
 def set_language(user_id, lang):
     return table("users").update({"language": lang}).eq("id", user_id).execute()
