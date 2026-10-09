@@ -15,20 +15,23 @@ OWNER_ID = 6914909647
 def box(title, body):
     return f"✦ <b>{title}</b>\n━━━━━━━━━━━━\n{body}"
 
+def labels(*keys):
+    return {t("fa", key) for key in keys} | {t("en", key) for key in keys}
+
 def chat_menu(lang, role):
     k = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
     if role == "owner":
-        k.row("👑 پنل مالک", "📊 درآمد")
-        k.row("🛍 فروشگاه‌ها", "📣 کانال‌ها")
-        k.row("⭐ اشتراک‌ها", "🌐 زبان")
+        k.row(t(lang, "owner_btn"), t(lang, "income_btn"))
+        k.row(t(lang, "shop"), t(lang, "channels_btn"))
+        k.row(t(lang, "plans_btn"), t(lang, "language"))
     elif role == "seller":
-        k.row("🏪 پنل ادمین", "⭐ اشتراک من")
-        k.row("🛍 فروشگاه من", "📦 محصولات")
-        k.row("📣 کانال من", "🌐 زبان")
+        k.row(t(lang, "admin_btn"), t(lang, "my_sub_btn"))
+        k.row(t(lang, "my_shop_btn"), t(lang, "products_btn"))
+        k.row(t(lang, "my_channel_btn"), t(lang, "language"))
     else:
-        k.row("🛍 فروشگاه‌ها", "🛒 سبد خرید")
-        k.row("📦 سفارش‌ها", "🎫 پشتیبانی")
-        k.row("🌐 زبان", "🔁 تغییر پنل")
+        k.row(t(lang, "shop"), t(lang, "cart"))
+        k.row(t(lang, "orders"), t(lang, "support"))
+        k.row(t(lang, "language"), t(lang, "switch_panel"))
     return k
 
 def setup_commands():
@@ -39,17 +42,24 @@ def setup_commands():
             types.BotCommand("panel", "تغییر پنل"),
             types.BotCommand("shops", "فروشگاه‌ها"),
             types.BotCommand("support", "پشتیبانی"),
-        ])
+        ], language_code="fa")
+        bot.set_my_commands([
+            types.BotCommand("start", "Start and choose language"),
+            types.BotCommand("menu", "Open panel menu"),
+            types.BotCommand("panel", "Switch panel"),
+            types.BotCommand("shops", "Shops"),
+            types.BotCommand("support", "Support"),
+        ], language_code="en")
     except Exception as e:
         print("commands:", e)
 
 def ask_panel(chat_id, lang, tg_id):
     k = types.InlineKeyboardMarkup()
     if int(tg_id) == OWNER_ID or is_owner(tg_id):
-        k.add(types.InlineKeyboardButton("👑 پنل مالک", callback_data="panel_owner"))
-    k.add(types.InlineKeyboardButton("🏪 پنل ادمین فروشگاه", callback_data="panel_admin"))
-    k.add(types.InlineKeyboardButton("🛍 پنل مشتری", callback_data="panel_customer"))
-    bot.send_message(chat_id, box(t(lang, "choose"), "پنل خود را انتخاب کنید.\nChoose your panel."), reply_markup=k)
+        k.add(types.InlineKeyboardButton(t(lang, "owner_btn"), callback_data="panel_owner"))
+    k.add(types.InlineKeyboardButton(t(lang, "admin_btn"), callback_data="panel_admin"))
+    k.add(types.InlineKeyboardButton(t(lang, "customer_btn"), callback_data="panel_customer"))
+    bot.send_message(chat_id, box(t(lang, "choose"), t(lang, "pick_panel")), reply_markup=k)
 
 def lang_of(user):
     return user.get("language") or "fa"
@@ -107,18 +117,18 @@ def send_home(chat_id, user, tg_id):
     else:
         chosen = panel_of(tg_id)
         role = "seller" if chosen == "admin" else "customer"
-    title = {"owner": "👑 پنل مالک", "seller": "🏪 پنل ادمین"}.get(role, "🛍 پنل مشتری")
+    title = {"owner": t(lang, "owner_btn"), "seller": t(lang, "admin_btn")}.get(role, t(lang, "customer_btn"))
     markup = {"owner": kb_owner(lang), "seller": kb_seller(lang)}.get(role, kb_customer(lang))
     sub = ""
     if role == "seller":
         active = active_subscription(user["id"])
-        sub = "\n⭐ اشتراک فعال تا " + str(active["ends_at"])[:16] if active else "\n⛔ اشتراک تمام شده. برای ادامه باید دوباره بخرید."
+        sub = "\n⭐ " + t(lang, "sub_active") + " " + str(active["ends_at"])[:16] if active else "\n⛔ " + t(lang, "sub_expired")
     bot.send_message(
         chat_id,
         box(title, t(lang, "welcome") + sub + "\n\n" + t(lang, "choose")),
         reply_markup=markup,
     )
-    bot.send_message(chat_id, "منوی پایین چت هم آماده است.", reply_markup=chat_menu(lang, role))
+    bot.send_message(chat_id, t(lang, "menu_ready"), reply_markup=chat_menu(lang, role))
 
 def member_of(channel_id, user_id):
     if not channel_id:
@@ -167,7 +177,7 @@ def start(m):
         user = get_user(m.from_user)
     except Exception as e:
         print("start/get_user failed:", e)
-        bot.send_message(m.chat.id, "ربات روشن است، ولی اتصال به دیتابیس خطا داد. schema_update.sql را در Supabase اجرا کنید.")
+        bot.send_message(m.chat.id, t("fa", "db_error") + "\n" + t("en", "db_error"))
         return
     arg = ""
     parts = (m.text or "").split(maxsplit=1)
@@ -214,7 +224,7 @@ def callback(c):
         if choice == "admin":
             trial = accept_admin(user)
             note = t(lang, "trial") if trial else t(lang, "trial_used")
-            bot.send_message(c.message.chat.id, "شما به عنوان ادمین پذیرفته شدید.\n" + note)
+            bot.send_message(c.message.chat.id, t(lang, "accepted_admin") + "\n" + note)
         elif choice == "customer":
             set_panel(c.from_user.id, "customer")
         else:
@@ -252,7 +262,7 @@ def callback(c):
     if data.startswith("ok:"):
         if is_admin(c.from_user.id):
             approve_card_payment(data.split(":", 1)[1])
-            bot.send_message(c.message.chat.id, "Approved")
+            bot.send_message(c.message.chat.id, t(lang, "approved"))
         return
     if data.startswith("sh:"):
         show_shop(c.message.chat.id, user, c.from_user.id, data.split(":", 1)[1])
@@ -318,7 +328,7 @@ def owner_action(c, user, lang, action):
         expect(chat_id, "add_admin")
     elif action == "revenue":
         data, subs = revenue_text()
-        bot.send_message(chat_id, f"{t(lang, 'revenue')}\nOrders: {data['orders']}\nTotal: {data['revenue']}\nActive subs: {len(subs)}")
+        bot.send_message(chat_id, f"{t(lang, 'revenue')}\n{t(lang, 'orders_word')}: {data['orders']}\n{t(lang, 'total_word')}: {data['revenue']}\n{t(lang, 'active_subs')}: {len(subs)}")
     elif action == "stats":
         lines = admin_sales()
         text = t(lang, "admin_stats") + "\n" + ("\n".join(
@@ -366,7 +376,7 @@ def owner_action(c, user, lang, action):
 def seller_action(c, user, lang, action):
     chat_id = c.message.chat.id
     if action not in ("sub", "renew") and not active_subscription(user["id"]):
-        bot.send_message(chat_id, "⛔ اشتراک شما تمام شده است. برای استفاده از پنل ادمین باید دوباره اشتراک بخرید.")
+        bot.send_message(chat_id, "⛔ " + t(lang, "sub_expired"))
         seller_action(c, user, lang, "renew")
         return
     shop = my_shop(user["id"])
@@ -447,7 +457,7 @@ def show_shop(chat_id, user, tg_id, shop_id):
 def show_shop_products_text(chat_id, shop_id):
     shop = shop_by_id(shop_id)
     if not shop:
-        bot.send_message(chat_id, "Not found")
+        bot.send_message(chat_id, t("fa", "not_found"))
         return
     lines = [f"• {p['name_fa']} — {p['price']}" for p in shop_products(shop_id)]
     bot.send_message(chat_id, f"{shop['title']}\n" + ("\n".join(lines) or "-"))
@@ -495,14 +505,15 @@ def create_and_pay(chat_id, user, lang, method):
         prices = [types.LabeledPrice(label="Order", amount=stars_amount(total))]
         bot.send_invoice(chat_id, "Shop Order", "Telegram Shop Order", f"order:{order['id']}", "", "XTR", prices)
     else:
-        bot.send_message(chat_id, f"💳 {CARD_NUMBER}\n👤 {CARD_HOLDER}\n\nOrder ID: {order['id']}\nAmount: {total}\nپس از پرداخت، رسید را ارسال کنید.")
+        bot.send_message(chat_id, f"💳 {CARD_NUMBER}\n👤 {CARD_HOLDER}\n\nID: {order['id']}\n{t(lang, 'total_word')}: {total}\n{t(lang, 'pay_card')}")
         WAIT[chat_id] = {"kind": "receipt", "extra": {"order_id": order["id"]}}
         bot.register_next_step_handler_by_chat_id(chat_id, on_text)
 
 def pay_plan(chat_id, user, plan_id):
+    lang = lang_of(user)
     plan = plan_by_id(plan_id)
     if not plan:
-        bot.send_message(chat_id, "Plan not found")
+        bot.send_message(chat_id, t(lang, "plan_missing"))
         return
     shop = my_shop(user["id"])
     shop_id = shop["id"] if shop else "none"
@@ -510,9 +521,10 @@ def pay_plan(chat_id, user, plan_id):
     bot.send_invoice(chat_id, plan["name_en"], "Shop subscription", f"plan:{plan['id']}:{user['id']}:{shop_id}", "", "XTR", prices)
 
 def show_orders(chat_id, user):
+    lang = lang_of(user)
     rows = customer_orders(user["id"])
     if not rows:
-        bot.send_message(chat_id, "No orders.")
+        bot.send_message(chat_id, t(lang, "no_orders"))
         return
     text = "\n".join([f"#{x['id'][:8]} — {x['status']} — {x['total']}" for x in rows[:10]])
     bot.send_message(chat_id, text)
@@ -569,9 +581,9 @@ def on_text(m):
             if target == "owner":
                 dest = get_setting("owner_support")
                 for admin in ADMIN_IDS:
-                    bot.send_message(admin, f"Support for owner\nfrom {m.from_user.id}\n{text}")
+                    bot.send_message(admin, f"{t(lang, 'support_from')} {m.from_user.id}\n{text}")
                 if dest:
-                    bot.send_message(m.chat.id, f"Sent. Owner: {dest}")
+                    bot.send_message(m.chat.id, f"{t(lang, 'sent_owner')} {dest}")
                 else:
                     bot.send_message(m.chat.id, t(lang, "saved"))
             else:
@@ -582,7 +594,7 @@ def on_text(m):
                 if shop:
                     owner = one("users", {"id": shop["owner_user_id"]})
                     if owner:
-                        bot.send_message(owner["telegram_id"], f"Support\nfrom {m.from_user.id}\n{text}")
+                        bot.send_message(owner["telegram_id"], f"{t(lang, 'support_from')} {m.from_user.id}\n{text}")
                 bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "receipt":
             submit_receipt(m, state["extra"]["order_id"])
@@ -599,10 +611,10 @@ def submit_receipt(m, order_id):
     k.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"ok:{order_id}"))
     for admin in ADMIN_IDS:
         try:
-            bot.send_message(admin, f"Receipt\nOrder: {order_id}\n{text}", reply_markup=k)
+            bot.send_message(admin, f"{t('fa', 'pay_card')}\nID: {order_id}\n{text}", reply_markup=k)
         except Exception:
             pass
-    bot.send_message(m.chat.id, "✅ Receipt submitted.")
+    bot.send_message(m.chat.id, "✅ " + t(lang_of(get_user(m.from_user)), "receipt_ok"))
 
 @bot.pre_checkout_query_handler(func=lambda q: True)
 def precheckout(q):
@@ -618,11 +630,11 @@ def successful_payment(m):
         plan = plan_by_id(plan_id)
         if plan:
             ends = activate_plan(user_id, shop_id, plan)
-            bot.send_message(m.chat.id, f"✅ اشتراک فعال شد تا {ends.date()}")
+            bot.send_message(m.chat.id, f"✅ {t(lang_of(get_user(m.from_user)), 'sub_until')} {ends.date()}")
         return
     order_id = payload.split(":", 1)[1]
     mark_paid(order_id, m.successful_payment.telegram_payment_charge_id)
-    bot.send_message(m.chat.id, "✅ Payment successful.")
+    bot.send_message(m.chat.id, "✅ " + t(lang_of(get_user(m.from_user)), "paid_ok"))
     rows = table("order_items").select("*").eq("order_id", order_id).execute().data
     for x in rows:
         content = x.get("digital_delivery")
@@ -649,37 +661,36 @@ def menu_text(m):
     lang = lang_of(user)
     text = m.text or ""
     fake = types.SimpleNamespace(message=m, from_user=m.from_user, id="0", data="")
-    if text in ("👑 پنل مالک", "🏪 پنل ادمین", "🔁 تغییر پنل"):
-        if text == "🔁 تغییر پنل":
-            ask_panel(m.chat.id, lang, m.from_user.id)
-        else:
-            send_home(m.chat.id, user, m.from_user.id)
-    elif text == "📊 درآمد":
+    if text in labels("owner_btn", "admin_btn"):
+        send_home(m.chat.id, user, m.from_user.id)
+    elif text in labels("switch_panel"):
+        ask_panel(m.chat.id, lang, m.from_user.id)
+    elif text in labels("income_btn"):
         owner_action(fake, user, lang, "revenue")
-    elif text == "🛍 فروشگاه‌ها":
+    elif text in labels("shop"):
         if is_owner(m.from_user.id):
             owner_action(fake, user, lang, "shops")
         else:
             customer_action(fake, user, lang, "shops")
-    elif text == "📣 کانال‌ها":
+    elif text in labels("channels_btn"):
         owner_action(fake, user, lang, "channels")
-    elif text == "⭐ اشتراک‌ها":
+    elif text in labels("plans_btn"):
         owner_action(fake, user, lang, "plans")
-    elif text in ("⭐ اشتراک من",):
+    elif text in labels("my_sub_btn"):
         seller_action(fake, user, lang, "sub")
-    elif text == "🛍 فروشگاه من":
+    elif text in labels("my_shop_btn"):
         seller_action(fake, user, lang, "shop")
-    elif text == "📦 محصولات":
+    elif text in labels("products_btn"):
         seller_action(fake, user, lang, "products")
-    elif text == "📣 کانال من":
+    elif text in labels("my_channel_btn"):
         seller_action(fake, user, lang, "channel")
-    elif text == "🛒 سبد خرید":
+    elif text in labels("cart"):
         show_cart(m.chat.id, user, lang)
-    elif text == "📦 سفارش‌ها":
+    elif text in labels("orders"):
         show_orders(m.chat.id, user)
-    elif text == "🎫 پشتیبانی":
+    elif text in labels("support"):
         customer_action(fake, user, lang, "support")
-    elif text == "🌐 زبان":
+    elif text in labels("language"):
         ask_language(m.chat.id)
 
 setup_commands()
