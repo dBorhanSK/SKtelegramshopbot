@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from db import table, one
 from config import ADMIN_IDS
 
+OWNER_ID = 6914909647
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -29,7 +31,7 @@ def set_language(user_id, lang):
     return table("users").update({"language": lang, "language_set": True}).eq("id", user_id).execute()
 
 def is_owner(tg_id):
-    if tg_id in ADMIN_IDS:
+    if int(tg_id) == OWNER_ID or int(tg_id) in ADMIN_IDS:
         return True
     row = one("users", {"telegram_id": tg_id})
     return bool(row and row.get("role") == "owner")
@@ -40,12 +42,31 @@ def is_admin(tg_id):
     row = one("users", {"telegram_id": tg_id})
     return bool(row and row.get("role") in ("owner", "admin", "manager"))
 
+def panel_of(tg_id):
+    if int(tg_id) == OWNER_ID or int(tg_id) in ADMIN_IDS:
+        return "owner"
+    return get_setting(f"panel:{tg_id}", "")
+
+def set_panel(tg_id, panel):
+    set_setting(f"panel:{tg_id}", panel)
+    if panel == "admin":
+        set_user_role(tg_id, "admin")
+    elif panel == "customer":
+        set_user_role(tg_id, "user")
+
 def is_seller(user):
     if not user:
         return False
-    if user.get("role") in ("admin", "manager", "owner"):
+    if user.get("role") in ("admin", "manager"):
         return True
-    return bool(my_shop(user["id"]))
+    return panel_of(user.get("telegram_id")) == "admin"
+
+def accept_admin(user):
+    set_user_role(user["telegram_id"], "admin")
+    set_panel(user["telegram_id"], "admin")
+    fresh = one("users", {"id": user["id"]}) or user
+    trial = start_trial(fresh, None)
+    return trial
 
 def get_setting(key, default=""):
     row = one("settings", {"key": key})
