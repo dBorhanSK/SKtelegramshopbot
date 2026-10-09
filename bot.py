@@ -26,18 +26,25 @@ def send_home(chat_id, lang):
     bot.send_message(chat_id, t(lang,"welcome") + "\n\n" + t(lang,"choose"), reply_markup=kb_main(lang))
 
 def channel_required(user_id):
+    # True means the user is allowed in. Empty channel setting must not block everyone.
     if not REQUIRED_CHANNEL_ID:
-        return False
+        return True
     try:
         m = bot.get_chat_member(REQUIRED_CHANNEL_ID, user_id)
         return m.status in ("member", "administrator", "creator")
-    except Exception:
-        return True
+    except Exception as e:
+        print("channel check failed:", e)
+        return False
 
 @bot.message_handler(commands=["start"])
 def start(m):
-    u = get_user(m.from_user)
-    lang = u.get("language","fa")
+    try:
+        u = get_user(m.from_user)
+        lang = u.get("language", "fa")
+    except Exception as e:
+        print("start/get_user failed:", e)
+        bot.send_message(m.chat.id, "ربات روشن است، ولی اتصال به دیتابیس خطا داد. کلید service_role و جدول users را چک کنید.")
+        return
     if not channel_required(m.from_user.id):
         k = types.InlineKeyboardMarkup()
         if REQUIRED_CHANNEL_USERNAME:
@@ -47,7 +54,7 @@ def start(m):
         return
     send_home(m.chat.id, lang)
 
-@bot.callback_query_handler(func=lambda c: True)
+@bot.callback_query_handler(func=lambda c: c.data not in ("admin_stats", "admin_orders", "admin_broadcast") and not c.data.startswith(("approve:", "ship:")))
 def callback(c):
     u = get_user(c.from_user)
     lang = u.get("language","fa")
@@ -60,6 +67,10 @@ def callback(c):
             send_home(c.message.chat.id, lang)
         else:
             bot.answer_callback_query(c.id, t(lang,"join_first"), show_alert=True)
+        return
+
+    if data == "home":
+        send_home(c.message.chat.id, lang)
         return
 
     if data == "language":
@@ -223,7 +234,7 @@ def create_ticket(m):
     u=get_user(m.from_user)
     row=table("tickets").insert({"user_id":u["id"],"message":m.text or "","status":"open"}).execute().data[0]
     for admin in ADMIN_IDS:
-        try: bot.send_message(admin,f"🎫 Ticket #{row['id']}\n@m.from_user.username\n{m.text}")
+        try: bot.send_message(admin, f"🎫 Ticket #{row['id']}\n@{m.from_user.username or '-'}\n{m.text}")
         except: pass
     bot.send_message(m.chat.id,"✅ Ticket created.")
 
@@ -233,6 +244,14 @@ def admin_menu(chat_id,lang):
           types.InlineKeyboardButton("📦 Orders",callback_data="admin_orders"))
     k.row(types.InlineKeyboardButton("📢 Broadcast",callback_data="admin_broadcast"))
     bot.send_message(chat_id,"⚙️ Admin Panel",reply_markup=k)
+
+@bot.callback_query_handler(func=lambda c: c.data=="admin_broadcast")
+def admin_broadcast(c):
+    if not is_admin(c.from_user.id):
+        return
+    bot.answer_callback_query(c.id)
+    bot.send_message(c.message.chat.id, "Send the broadcast text now.")
+    bot.register_next_step_handler_by_chat_id(c.message.chat.id, do_broadcast)
 
 @bot.callback_query_handler(func=lambda c: c.data=="admin_stats")
 def admin_stats(c):
