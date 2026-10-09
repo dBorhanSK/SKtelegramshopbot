@@ -169,7 +169,10 @@ def bot_link(shop_id):
 
 def expect(chat_id, kind, extra=None):
     WAIT[chat_id] = {"kind": kind, "extra": extra or {}}
-    bot.register_next_step_handler_by_chat_id(chat_id, on_text)
+    try:
+        bot.clear_step_handler_by_chat_id(chat_id)
+    except Exception:
+        pass
 
 @bot.message_handler(commands=["start"])
 def start(m):
@@ -310,7 +313,6 @@ def callback(c):
         target = data.split(":", 1)[1]
         WAIT[c.message.chat.id] = {"kind": "support", "extra": {"target": target, "user": user}}
         bot.send_message(c.message.chat.id, t(lang, "ticket"))
-        bot.register_next_step_handler_by_chat_id(c.message.chat.id, on_text)
 
 def owner_action(c, user, lang, action):
     chat_id = c.message.chat.id
@@ -507,7 +509,6 @@ def create_and_pay(chat_id, user, lang, method):
     else:
         bot.send_message(chat_id, f"💳 {CARD_NUMBER}\n👤 {CARD_HOLDER}\n\nID: {order['id']}\n{t(lang, 'total_word')}: {total}\n{t(lang, 'pay_card')}")
         WAIT[chat_id] = {"kind": "receipt", "extra": {"order_id": order["id"]}}
-        bot.register_next_step_handler_by_chat_id(chat_id, on_text)
 
 def pay_plan(chat_id, user, plan_id):
     lang = lang_of(user)
@@ -538,6 +539,10 @@ def parse_channel(text):
 def on_text(m):
     state = WAIT.pop(m.chat.id, None)
     if not state:
+        handle_menu(m)
+        return
+    if is_menu_text(m.text or ""):
+        handle_menu(m)
         return
     user = get_user(m.from_user)
     lang = lang_of(user)
@@ -655,42 +660,74 @@ def menu_commands(m):
         return
     send_home(m.chat.id, user, m.from_user.id)
 
-@bot.message_handler(func=lambda m: m.content_type == "text" and m.chat.id not in WAIT)
-def menu_text(m):
+def is_menu_text(text):
+    raw = (text or "").strip()
+    if raw in labels("owner_btn", "admin_btn", "switch_panel", "income_btn", "shop", "channels_btn", "plans_btn", "my_sub_btn", "my_shop_btn", "products_btn", "my_channel_btn", "cart", "orders", "support", "language"):
+        return True
+    folded = raw.replace("🛍", "").replace("📦", "").replace("🛒", "").replace("🎫", "").replace("🌐", "").replace("⭐", "").replace("📣", "").replace("📊", "").replace("👑", "").replace("🏪", "").replace("🔁", "").strip()
+    keys = ("فروشگاه من", "محصولات", "اشتراک من", "کانال من", "سبد خرید", "سفارش", "پشتیبانی", "زبان", "درآمد", "کانال", "تغییر پنل", "My shop", "Products", "My subscription", "My channel", "Cart", "Orders", "Support", "Language", "Revenue", "Shops", "Switch panel")
+    return any(k.lower() in folded.lower() for k in keys)
+
+def handle_menu(m):
+    try:
+        bot.clear_step_handler_by_chat_id(m.chat.id)
+    except Exception:
+        pass
+    WAIT.pop(m.chat.id, None)
     user = get_user(m.from_user)
     lang = lang_of(user)
     text = m.text or ""
+    folded = text.replace("🛍", "").replace("📦", "").replace("🛒", "").replace("🎫", "").replace("🌐", "").replace("⭐", "").replace("📣", "").replace("📊", "").replace("👑", "").replace("🏪", "").replace("🔁", "").strip().lower()
     fake = types.SimpleNamespace(message=m, from_user=m.from_user, id="0", data="")
-    if text in labels("owner_btn", "admin_btn"):
+    if text in labels("owner_btn", "admin_btn") or folded in ("پنل مالک", "پنل ادمین", "owner panel", "admin panel"):
         send_home(m.chat.id, user, m.from_user.id)
-    elif text in labels("switch_panel"):
+    elif text in labels("switch_panel") or "تغییر پنل" in folded or "switch panel" in folded:
         ask_panel(m.chat.id, lang, m.from_user.id)
-    elif text in labels("income_btn"):
+    elif text in labels("income_btn") or folded in ("درآمد", "revenue"):
         owner_action(fake, user, lang, "revenue")
-    elif text in labels("shop"):
+    elif text in labels("my_shop_btn") or "فروشگاه من" in folded or "my shop" in folded:
+        seller_action(fake, user, lang, "shop")
+    elif text in labels("shop") or folded in ("فروشگاه‌ها", "فروشگاه ها", "shops"):
         if is_owner(m.from_user.id):
             owner_action(fake, user, lang, "shops")
         else:
             customer_action(fake, user, lang, "shops")
-    elif text in labels("channels_btn"):
+    elif text in labels("channels_btn") or folded in ("کانال‌ها", "کانال ها", "channels"):
         owner_action(fake, user, lang, "channels")
-    elif text in labels("plans_btn"):
+    elif text in labels("plans_btn") or folded in ("اشتراک‌ها", "اشتراک ها", "plans"):
         owner_action(fake, user, lang, "plans")
-    elif text in labels("my_sub_btn"):
+    elif text in labels("my_sub_btn") or "اشتراک من" in folded or "my subscription" in folded:
         seller_action(fake, user, lang, "sub")
-    elif text in labels("my_shop_btn"):
-        seller_action(fake, user, lang, "shop")
-    elif text in labels("products_btn"):
+    elif text in labels("products_btn") or folded in ("محصولات", "products"):
         seller_action(fake, user, lang, "products")
-    elif text in labels("my_channel_btn"):
+    elif text in labels("my_channel_btn") or "کانال من" in folded or "my channel" in folded:
         seller_action(fake, user, lang, "channel")
-    elif text in labels("cart"):
+    elif text in labels("cart") or "سبد" in folded or folded == "cart":
         show_cart(m.chat.id, user, lang)
-    elif text in labels("orders"):
+    elif text in labels("orders") or "سفارش" in folded or "orders" in folded:
         show_orders(m.chat.id, user)
-    elif text in labels("support"):
+    elif text in labels("support") or "پشتیبانی" in folded or folded == "support":
         customer_action(fake, user, lang, "support")
-    elif text in labels("language"):
+    elif text in labels("language") or folded in ("زبان", "language"):
         ask_language(m.chat.id)
+    else:
+        bot.send_message(m.chat.id, t(lang, "choose"))
+
+@bot.message_handler(func=lambda m: m.content_type == "text" and not (m.text or "").startswith("/"))
+def menu_text(m):
+    try:
+        if is_menu_text(m.text or ""):
+            handle_menu(m)
+            return
+        if m.chat.id in WAIT:
+            on_text(m)
+            return
+        handle_menu(m)
+    except Exception as e:
+        print("menu failed:", e)
+        try:
+            bot.send_message(m.chat.id, "Error: " + str(e)[:200])
+        except Exception:
+            pass
 
 setup_commands()
