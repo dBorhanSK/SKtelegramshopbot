@@ -10,6 +10,46 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 WAIT = {}
 PENDING_SHOP = {}
 LAST_SHOP = {}
+OWNER_ID = 6914909647
+
+def box(title, body):
+    return f"✦ <b>{title}</b>\n━━━━━━━━━━━━\n{body}"
+
+def chat_menu(lang, role):
+    k = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
+    if role == "owner":
+        k.row("👑 پنل مالک", "📊 درآمد")
+        k.row("🛍 فروشگاه‌ها", "📣 کانال‌ها")
+        k.row("⭐ اشتراک‌ها", "🌐 زبان")
+    elif role == "seller":
+        k.row("🏪 پنل ادمین", "⭐ اشتراک من")
+        k.row("🛍 فروشگاه من", "📦 محصولات")
+        k.row("📣 کانال من", "🌐 زبان")
+    else:
+        k.row("🛍 فروشگاه‌ها", "🛒 سبد خرید")
+        k.row("📦 سفارش‌ها", "🎫 پشتیبانی")
+        k.row("🌐 زبان", "🔁 تغییر پنل")
+    return k
+
+def setup_commands():
+    try:
+        bot.set_my_commands([
+            types.BotCommand("start", "شروع و انتخاب زبان"),
+            types.BotCommand("menu", "منوی پنل"),
+            types.BotCommand("panel", "تغییر پنل"),
+            types.BotCommand("shops", "فروشگاه‌ها"),
+            types.BotCommand("support", "پشتیبانی"),
+        ])
+    except Exception as e:
+        print("commands:", e)
+
+def ask_panel(chat_id, lang, tg_id):
+    k = types.InlineKeyboardMarkup()
+    if int(tg_id) == OWNER_ID or is_owner(tg_id):
+        k.add(types.InlineKeyboardButton("👑 پنل مالک", callback_data="panel_owner"))
+    k.add(types.InlineKeyboardButton("🏪 پنل ادمین فروشگاه", callback_data="panel_admin"))
+    k.add(types.InlineKeyboardButton("🛍 پنل مشتری", callback_data="panel_customer"))
+    bot.send_message(chat_id, box(t(lang, "choose"), "پنل خود را انتخاب کنید.\nChoose your panel."), reply_markup=k)
 
 def lang_of(user):
     return user.get("language") or "fa"
@@ -62,10 +102,23 @@ def kb_customer(lang):
 
 def send_home(chat_id, user, tg_id):
     lang = lang_of(user)
-    role = role_of(user, tg_id)
-    title = {"owner": t(lang, "owner_panel"), "seller": t(lang, "admin_panel")}.get(role, t(lang, "customer_panel"))
+    if int(tg_id) == OWNER_ID or is_owner(tg_id):
+        role = "owner"
+    else:
+        chosen = panel_of(tg_id)
+        role = "seller" if chosen == "admin" else "customer"
+    title = {"owner": "👑 پنل مالک", "seller": "🏪 پنل ادمین"}.get(role, "🛍 پنل مشتری")
     markup = {"owner": kb_owner(lang), "seller": kb_seller(lang)}.get(role, kb_customer(lang))
-    bot.send_message(chat_id, t(lang, "welcome") + "\n\n" + title + "\n" + t(lang, "choose"), reply_markup=markup)
+    sub = ""
+    if role == "seller":
+        active = active_subscription(user["id"])
+        sub = "\n⭐ اشتراک فعال تا " + str(active["ends_at"])[:16] if active else "\n⛔ اشتراک تمام شده. برای ادامه باید دوباره بخرید."
+    bot.send_message(
+        chat_id,
+        box(title, t(lang, "welcome") + sub + "\n\n" + t(lang, "choose")),
+        reply_markup=markup,
+    )
+    bot.send_message(chat_id, "منوی پایین چت هم آماده است.", reply_markup=chat_menu(lang, role))
 
 def member_of(channel_id, user_id):
     if not channel_id:
@@ -125,6 +178,9 @@ def start(m):
     if not user.get("language_set"):
         ask_language(m.chat.id)
         return
+    if panel_of(m.from_user.id) == "" and int(m.from_user.id) != OWNER_ID:
+        ask_panel(m.chat.id, lang_of(user), m.from_user.id)
+        return
     open_pending_or_home(m.chat.id, user, m.from_user.id)
 
 def open_pending_or_home(chat_id, user, tg_id):
@@ -148,7 +204,23 @@ def callback(c):
     if data.startswith("lang_"):
         set_language(user["id"], data[-2:])
         user = get_user(c.from_user)
-        open_pending_or_home(c.message.chat.id, user, c.from_user.id)
+        ask_panel(c.message.chat.id, lang_of(user), c.from_user.id)
+        return
+    if data.startswith("panel_"):
+        choice = data.split("_", 1)[1]
+        if choice == "owner" and not is_owner(c.from_user.id):
+            bot.send_message(c.message.chat.id, t(lang, "admin_only"))
+            return
+        if choice == "admin":
+            trial = accept_admin(user)
+            note = t(lang, "trial") if trial else t(lang, "trial_used")
+            bot.send_message(c.message.chat.id, "شما به عنوان ادمین پذیرفته شدید.\n" + note)
+        elif choice == "customer":
+            set_panel(c.from_user.id, "customer")
+        else:
+            set_panel(c.from_user.id, "owner")
+        user = get_user(c.from_user)
+        send_home(c.message.chat.id, user, c.from_user.id)
         return
     if not user.get("language_set"):
         ask_language(c.message.chat.id)
@@ -293,6 +365,10 @@ def owner_action(c, user, lang, action):
 
 def seller_action(c, user, lang, action):
     chat_id = c.message.chat.id
+    if action not in ("sub", "renew") and not active_subscription(user["id"]):
+        bot.send_message(chat_id, "⛔ اشتراک شما تمام شده است. برای استفاده از پنل ادمین باید دوباره اشتراک بخرید.")
+        seller_action(c, user, lang, "renew")
+        return
     shop = my_shop(user["id"])
     if action == "shop":
         if not shop:
@@ -425,12 +501,13 @@ def create_and_pay(chat_id, user, lang, method):
 
 def pay_plan(chat_id, user, plan_id):
     plan = plan_by_id(plan_id)
-    shop = my_shop(user["id"])
-    if not plan or not shop:
-        bot.send_message(chat_id, "Plan or shop not found")
+    if not plan:
+        bot.send_message(chat_id, "Plan not found")
         return
+    shop = my_shop(user["id"])
+    shop_id = shop["id"] if shop else "none"
     prices = [types.LabeledPrice(label=plan["name_en"], amount=max(1, int(plan["stars"])))]
-    bot.send_invoice(chat_id, plan["name_en"], "Shop subscription", f"plan:{plan['id']}:{user['id']}", "", "XTR", prices)
+    bot.send_invoice(chat_id, plan["name_en"], "Shop subscription", f"plan:{plan['id']}:{user['id']}:{shop_id}", "", "XTR", prices)
 
 def show_orders(chat_id, user):
     rows = customer_orders(user["id"])
@@ -535,13 +612,13 @@ def precheckout(q):
 def successful_payment(m):
     payload = m.successful_payment.invoice_payload
     if payload.startswith("plan:"):
-        _, plan_id, user_id = payload.split(":", 2)
-        user = one("users", {"id": user_id})
+        parts = payload.split(":")
+        plan_id, user_id = parts[1], parts[2]
+        shop_id = parts[3] if len(parts) > 3 and parts[3] != "none" else None
         plan = plan_by_id(plan_id)
-        shop = my_shop(user_id)
-        if user and plan and shop:
-            ends = activate_plan(user_id, shop["id"], plan)
-            bot.send_message(m.chat.id, f"✅ Subscription active until {ends.date()}")
+        if plan:
+            ends = activate_plan(user_id, shop_id, plan)
+            bot.send_message(m.chat.id, f"✅ اشتراک فعال شد تا {ends.date()}")
         return
     order_id = payload.split(":", 1)[1]
     mark_paid(order_id, m.successful_payment.telegram_payment_charge_id)
@@ -552,10 +629,57 @@ def successful_payment(m):
         if content:
             bot.send_message(m.chat.id, f"🔐 {x.get('product_name')}\n\n{content}")
 
-@bot.message_handler(commands=["admin"])
-def admin_command(m):
+@bot.message_handler(commands=["menu", "panel", "shops", "support"])
+def menu_commands(m):
     user = get_user(m.from_user)
-    if is_owner(m.from_user.id) or is_seller(user):
-        send_home(m.chat.id, user, m.from_user.id)
-    else:
-        bot.send_message(m.chat.id, t("fa", "admin_only"))
+    if m.text.startswith("/panel"):
+        ask_panel(m.chat.id, lang_of(user), m.from_user.id)
+        return
+    if m.text.startswith("/shops"):
+        customer_action(types.SimpleNamespace(message=m), user, lang_of(user), "shops")
+        return
+    if m.text.startswith("/support"):
+        customer_action(types.SimpleNamespace(message=m), user, lang_of(user), "support")
+        return
+    send_home(m.chat.id, user, m.from_user.id)
+
+@bot.message_handler(func=lambda m: m.content_type == "text" and m.chat.id not in WAIT)
+def menu_text(m):
+    user = get_user(m.from_user)
+    lang = lang_of(user)
+    text = m.text or ""
+    fake = types.SimpleNamespace(message=m, from_user=m.from_user, id="0", data="")
+    if text in ("👑 پنل مالک", "🏪 پنل ادمین", "🔁 تغییر پنل"):
+        if text == "🔁 تغییر پنل":
+            ask_panel(m.chat.id, lang, m.from_user.id)
+        else:
+            send_home(m.chat.id, user, m.from_user.id)
+    elif text == "📊 درآمد":
+        owner_action(fake, user, lang, "revenue")
+    elif text == "🛍 فروشگاه‌ها":
+        if is_owner(m.from_user.id):
+            owner_action(fake, user, lang, "shops")
+        else:
+            customer_action(fake, user, lang, "shops")
+    elif text == "📣 کانال‌ها":
+        owner_action(fake, user, lang, "channels")
+    elif text == "⭐ اشتراک‌ها":
+        owner_action(fake, user, lang, "plans")
+    elif text in ("⭐ اشتراک من",):
+        seller_action(fake, user, lang, "sub")
+    elif text == "🛍 فروشگاه من":
+        seller_action(fake, user, lang, "shop")
+    elif text == "📦 محصولات":
+        seller_action(fake, user, lang, "products")
+    elif text == "📣 کانال من":
+        seller_action(fake, user, lang, "channel")
+    elif text == "🛒 سبد خرید":
+        show_cart(m.chat.id, user, lang)
+    elif text == "📦 سفارش‌ها":
+        show_orders(m.chat.id, user)
+    elif text == "🎫 پشتیبانی":
+        customer_action(fake, user, lang, "support")
+    elif text == "🌐 زبان":
+        ask_language(m.chat.id)
+
+setup_commands()
