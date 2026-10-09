@@ -653,12 +653,19 @@ def menu_commands(m):
         ask_panel(m.chat.id, lang_of(user), m.from_user.id)
         return
     if m.text.startswith("/shops"):
-        customer_action(types.SimpleNamespace(message=m), user, lang_of(user), "shops")
+        customer_action(Click(m), user, lang_of(user), "shops")
         return
     if m.text.startswith("/support"):
-        customer_action(types.SimpleNamespace(message=m), user, lang_of(user), "support")
+        customer_action(Click(m), user, lang_of(user), "support")
         return
     send_home(m.chat.id, user, m.from_user.id)
+
+class Click:
+    def __init__(self, message):
+        self.message = message
+        self.from_user = message.from_user
+        self.id = "0"
+        self.data = ""
 
 def is_menu_text(text):
     raw = (text or "").strip()
@@ -678,7 +685,7 @@ def handle_menu(m):
     lang = lang_of(user)
     text = m.text or ""
     folded = text.replace("🛍", "").replace("📦", "").replace("🛒", "").replace("🎫", "").replace("🌐", "").replace("⭐", "").replace("📣", "").replace("📊", "").replace("👑", "").replace("🏪", "").replace("🔁", "").strip().lower()
-    fake = types.SimpleNamespace(message=m, from_user=m.from_user, id="0", data="")
+    fake = Click(m)
     if text in labels("owner_btn", "admin_btn") or folded in ("پنل مالک", "پنل ادمین", "owner panel", "admin panel"):
         send_home(m.chat.id, user, m.from_user.id)
     elif text in labels("switch_panel") or "تغییر پنل" in folded or "switch panel" in folded:
@@ -731,3 +738,4 @@ def menu_text(m):
             pass
 
 setup_commands()
+
