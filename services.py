@@ -464,9 +464,33 @@ def deactivate_product(product_id):
     return table("products").update({"active": False}).eq("id", product_id).execute()
 
 def deactivate_shop(shop_id):
-    # also deactivate products
-    table("products").update({"active": False}).eq("shop_id", shop_id).execute()
-    return table("shops").delete().eq("id", shop_id).execute()
+    """Completely remove a shop and its related data so it no longer appears anywhere."""
+    if not shop_id:
+        return None
+    # Null out / clean references that might block the delete or leave orphans
+    try:
+        table("products").update({"active": False, "shop_id": None}).eq("shop_id", shop_id).execute()
+    except Exception:
+        table("products").update({"active": False}).eq("shop_id", shop_id).execute()
+    try:
+        table("orders").update({"shop_id": None}).eq("shop_id", shop_id).execute()
+    except Exception:
+        pass
+    try:
+        table("deals").update({"shop_id": None}).eq("shop_id", shop_id).execute()
+    except Exception:
+        pass
+    try:
+        table("subscriptions").update({"shop_id": None}).eq("shop_id", shop_id).execute()
+    except Exception:
+        pass
+    try:
+        table("support_messages").update({"shop_id": None}).eq("shop_id", shop_id).execute()
+    except Exception:
+        pass
+    # Finally hard-delete the shop row
+    res = table("shops").delete().eq("id", shop_id).execute()
+    return res
 
 def deduct_stock(product_id, qty):
     """Atomic (compare-and-swap) stock decrement. False when there isn't enough."""
