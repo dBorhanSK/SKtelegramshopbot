@@ -216,11 +216,13 @@ def kb_customer(lang):
 
 def send_home(chat_id, user, tg_id):
     lang = lang_of(user)
-    if int(tg_id) == OWNER_ID or is_owner(tg_id):
+    chosen = panel_of(tg_id)
+    if chosen == "admin":
+        role = "seller"
+    elif int(tg_id) == OWNER_ID or is_owner(tg_id):
         role = "owner"
     else:
-        chosen = panel_of(tg_id)
-        role = "seller" if chosen == "admin" else "customer"
+        role = "customer"
     title = {"owner": t(lang, "owner_btn"), "seller": t(lang, "admin_btn")}.get(role, t(lang, "customer_btn"))
     markup = {"owner": kb_owner(lang), "seller": kb_seller(lang)}.get(role, kb_customer(lang))
     sub = ""
@@ -1151,7 +1153,9 @@ def callback(c):
             bot.send_message(c.message.chat.id, t(lang, "saved"))
     elif data.startswith("ra:"):
         if is_owner(c.from_user.id):
-            set_user_role(int(data.split(":", 1)[1]), "user")
+            tg = int(data.split(":", 1)[1])
+            set_user_role(tg, "user")
+            set_setting(f"exempt_sub:{tg}", "")
             bot.send_message(c.message.chat.id, t(lang, "saved"))
     elif data.startswith("dc:"):
         if is_owner(c.from_user.id):
@@ -1174,7 +1178,7 @@ def callback(c):
     elif data.startswith("dxy:"):
         shop_id = data.split(":", 1)[1]
         shop = shop_by_id(shop_id)
-        if shop and (is_owner(c.from_user.id) or (my_shop(user["id"]) and my_shop(user["id"])["id"] == shop_id)):
+        if shop and (is_owner(c.from_user.id) or shop.get("owner_user_id") == user["id"]):
             deactivate_shop(shop_id)
             bot.send_message(c.message.chat.id, t(lang, "shop_deleted"))
         else:
@@ -1230,7 +1234,7 @@ def owner_action(c, user, lang, action):
         ) or "-")
         bot.send_message(chat_id, text[:4000])
     elif action == "shops":
-        rows = [s for s in all_shops() if s.get("active", True)]
+        rows = all_shops()
         if not rows:
             bot.send_message(chat_id, t(lang, "no_shops"))
             return
@@ -1271,7 +1275,9 @@ def owner_action(c, user, lang, action):
 
 def seller_action(c, user, lang, action):
     chat_id = c.message.chat.id
-    if action not in ("sub", "renew", "method", "orders") and not active_subscription(user["id"]) and not is_owner(user.get("telegram_id")):
+    # Owner and admins explicitly appointed by the owner are exempt from subscription.
+    exempt = is_owner(user.get("telegram_id")) or get_setting(f"exempt_sub:{user.get('telegram_id')}") == "yes"
+    if action not in ("sub", "renew", "method", "orders") and not active_subscription(user["id"]) and not exempt:
         bot.send_message(chat_id, "⛔ " + t(lang, "sub_expired"))
         seller_action(c, user, lang, "renew")
         return
@@ -1399,7 +1405,7 @@ def show_owner_shop(chat_id, user, tg_id, lang, shop_id):
         bot.send_message(chat_id, t(lang, "admin_only"))
         return
     shop = shop_by_id(shop_id)
-    if not shop or not shop.get("active", True):
+    if not shop:
         bot.send_message(chat_id, t(lang, "not_found"))
         return
     text = f"<b>{esc(shop['title'])}</b>\nOwner: {shop.get('owner_user_id')}\n{t(lang, 'link')}: {bot_link(shop['id'])}"
@@ -1736,7 +1742,10 @@ def on_text(m):
     text = m.text or m.caption or ""
     try:
         if kind == "add_admin":
-            row = set_user_role(int(text.strip()), "admin")
+            tg = int(text.strip())
+            row = set_user_role(tg, "admin")
+            if row:
+                set_setting(f"exempt_sub:{tg}", "yes")
             bot.send_message(m.chat.id, t(lang, "saved") if row else t(lang, "not_found"))
         elif kind in ("review", "report"):
             body = text.strip()
