@@ -10,6 +10,7 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 WAIT = {}
 PENDING_SHOP = {}
 LAST_SHOP = {}
+DEAL_CHAT = {}
 OWNER_ID = 6914909647
 
 def box(title, body):
@@ -95,6 +96,7 @@ def kb_seller(lang):
     k = types.InlineKeyboardMarkup()
     k.row(types.InlineKeyboardButton(t(lang, "my_shop"), callback_data="sel:shop"))
     k.row(types.InlineKeyboardButton(t(lang, "my_products"), callback_data="sel:products"))
+    k.row(types.InlineKeyboardButton(t(lang, "pay_method"), callback_data="sel:method"))
     k.row(types.InlineKeyboardButton(t(lang, "my_sub"), callback_data="sel:sub"))
     k.row(types.InlineKeyboardButton(t(lang, "my_channel"), callback_data="sel:channel"))
     k.row(types.InlineKeyboardButton(t(lang, "my_support"), callback_data="sel:support"))
@@ -267,6 +269,41 @@ def callback(c):
             approve_card_payment(data.split(":", 1)[1])
             bot.send_message(c.message.chat.id, t(lang, "approved"))
         return
+    if data.startswith("spm:"):
+        shop = my_shop(user["id"])
+        if shop:
+            set_shop_pay_method(shop["id"], data.split(":", 1)[1])
+            bot.send_message(c.message.chat.id, t(lang, "method_saved"))
+        return
+    if data.startswith("pm:"):
+        state = WAIT.get(c.message.chat.id) or {}
+        draft = (state.get("extra") or {}).get("draft") or {}
+        draft["pay_method"] = data.split(":", 1)[1]
+        if draft["pay_method"] == "stars":
+            bot.send_message(c.message.chat.id, t(lang, "ask_stars"))
+            expect(c.message.chat.id, "prod_stars", {"draft": draft, "shop_id": (state.get("extra") or {}).get("shop_id")})
+        else:
+            bot.send_message(c.message.chat.id, t(lang, "ask_file"))
+            expect(c.message.chat.id, "prod_file", {"draft": draft, "shop_id": (state.get("extra") or {}).get("shop_id")})
+        return
+    if data.startswith("rv:"):
+        expect(c.message.chat.id, "review", {"product_id": data.split(":", 1)[1]})
+        bot.send_message(c.message.chat.id, t(lang, "ask_review"))
+        return
+    if data.startswith("rp:"):
+        expect(c.message.chat.id, "report", {"product_id": data.split(":", 1)[1]})
+        bot.send_message(c.message.chat.id, t(lang, "ask_report"))
+        return
+    if data.startswith("by:"):
+        start_buy(c.message.chat.id, user, lang, data.split(":", 1)[1])
+        return
+    if data.startswith("cf:"):
+        confirm_deal(c, data.split(":", 1)[1])
+        return
+    if data.startswith("cx:"):
+        close_deal(data.split(":", 1)[1], "cancelled")
+        bot.send_message(c.message.chat.id, t(lang, "saved"))
+        return
     if data.startswith("sh:"):
         show_shop(c.message.chat.id, user, c.from_user.id, data.split(":", 1)[1])
     elif data.startswith("pr:"):
@@ -377,7 +414,7 @@ def owner_action(c, user, lang, action):
 
 def seller_action(c, user, lang, action):
     chat_id = c.message.chat.id
-    if action not in ("sub", "renew") and not active_subscription(user["id"]):
+    if action not in ("sub", "renew", "method") and not active_subscription(user["id"]) and not is_owner(user.get("telegram_id")):
         bot.send_message(chat_id, "⛔ " + t(lang, "sub_expired"))
         seller_action(c, user, lang, "renew")
         return
@@ -392,9 +429,24 @@ def seller_action(c, user, lang, action):
         if not shop:
             bot.send_message(chat_id, t(lang, "send_shop"))
             return
-        lines = [f"• {p['name_fa']} — {p['price']}" for p in shop_products(shop["id"])]
-        bot.send_message(chat_id, (t(lang, "my_products") + "\n" + "\n".join(lines) + "\n\n" + t(lang, "send_product"))[:4000])
-        expect(chat_id, "add_product", {"shop_id": shop["id"]})
+        lines = [f"• {p['name_fa']} — {p.get('pay_method') or 'stars'}" for p in shop_products(shop["id"])]
+        k = types.InlineKeyboardMarkup()
+        k.add(types.InlineKeyboardButton(t(lang, "add_product_btn"), callback_data="sel:newprod"))
+        bot.send_message(chat_id, (t(lang, "my_products") + "\n" + "\n".join(lines or ["-"]))[:4000], reply_markup=k)
+    elif action == "newprod":
+        if not shop:
+            bot.send_message(chat_id, t(lang, "send_shop"))
+            return
+        bot.send_message(chat_id, t(lang, "ask_name_fa"))
+        expect(chat_id, "prod_name_fa", {"shop_id": shop["id"], "draft": {}})
+    elif action == "method":
+        if not shop:
+            bot.send_message(chat_id, t(lang, "send_shop"))
+            return
+        k = types.InlineKeyboardMarkup()
+        k.add(types.InlineKeyboardButton(t(lang, "method_stars"), callback_data="spm:stars"))
+        k.add(types.InlineKeyboardButton(t(lang, "method_custom"), callback_data="spm:custom"))
+        bot.send_message(chat_id, t(lang, "pay_method") + f": {shop.get('pay_method') or 'stars'}", reply_markup=k)
     elif action == "sub":
         sub = active_subscription(user["id"])
         k = types.InlineKeyboardMarkup()
@@ -469,13 +521,113 @@ def show_product(chat_id, lang, pid):
     if not p:
         bot.send_message(chat_id, t(lang, "not_found"))
         return
+    shop = shop_by_id(p.get("shop_id")) if p.get("shop_id") else None
     name = p["name_fa"] if lang == "fa" else p["name_en"]
-    desc = p.get("description_fa") if lang == "fa" else p.get("description_en")
-    text = f"<b>{name}</b>\n\n{desc or ''}\n\n💵 {p['price']}\n📦 {p.get('stock')}"
+    method = product_method(p, shop)
+    price = f"{p.get('stars_price') or p.get('price')} ⭐" if method == "stars" else t(lang, "custom_price")
+    text = f"<b>{name}</b>\n\n{price}\n\n{feedback_text(lang, pid)}"
     k = types.InlineKeyboardMarkup()
-    k.add(types.InlineKeyboardButton(t(lang, "cart"), callback_data=f"add:{pid}"))
-    k.add(types.InlineKeyboardButton(t(lang, "buy"), callback_data=f"add:{pid}"))
-    bot.send_message(chat_id, text, reply_markup=k)
+    k.add(types.InlineKeyboardButton(t(lang, "buy"), callback_data=f"by:{pid}"))
+    k.add(types.InlineKeyboardButton(t(lang, "good_product"), callback_data=f"rv:{pid}"))
+    k.add(types.InlineKeyboardButton(t(lang, "report_product"), callback_data=f"rp:{pid}"))
+    send_banner(chat_id, p, text, k)
+
+def feedback_text(lang, pid):
+    reviews, reports = product_feedback(pid)
+    rlines = "\n".join([f"• {x.get('comment')}" for x in reviews if x.get("comment")]) or t(lang, "no_reviews")
+    plines = "\n".join([f"• {x.get('reason')}" for x in reports if x.get("reason")]) or t(lang, "no_reports")
+    return f"{t(lang, 'reviews')} ({len(reviews)})\n{rlines}\n\n{t(lang, 'reports')} ({len(reports)})\n{plines}"
+
+def send_banner(chat_id, p, text, markup=None):
+    fid = p.get("banner_file_id")
+    kind = p.get("banner_type")
+    try:
+        if fid and kind == "photo":
+            bot.send_photo(chat_id, fid, caption=text, reply_markup=markup)
+        elif fid and kind == "video":
+            bot.send_video(chat_id, fid, caption=text, reply_markup=markup)
+        elif fid:
+            bot.send_document(chat_id, fid, caption=text, reply_markup=markup)
+        else:
+            bot.send_message(chat_id, text, reply_markup=markup)
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup)
+
+def start_buy(chat_id, user, lang, pid):
+    p = product(pid)
+    if not p:
+        bot.send_message(chat_id, t(lang, "not_found"))
+        return
+    shop = shop_by_id(p.get("shop_id")) if p.get("shop_id") else None
+    method = product_method(p, shop)
+    if method == "stars":
+        amount = max(1, int(p.get("stars_price") or p.get("price") or 1))
+        prices = [types.LabeledPrice(label=p.get("name_en") or "Product", amount=amount)]
+        bot.send_invoice(chat_id, p.get("name_en") or "Product", "Shop product", f"prod:{p['id']}:{user['id']}", "", "XTR", prices)
+        return
+    seller = one("users", {"id": shop["owner_user_id"]}) if shop else None
+    if not seller:
+        bot.send_message(chat_id, t(lang, "not_found"))
+        return
+    deal = create_deal(p, user, seller)
+    if not deal:
+        bot.send_message(chat_id, t(lang, "not_found"))
+        return
+    DEAL_CHAT[chat_id] = deal["id"]
+    DEAL_CHAT[seller["telegram_id"]] = deal["id"]
+    k = types.InlineKeyboardMarkup()
+    k.add(types.InlineKeyboardButton(t(lang, "confirm_paid"), callback_data=f"cf:{deal['id']}"))
+    k.add(types.InlineKeyboardButton(t(lang, "cancel_deal"), callback_data=f"cx:{deal['id']}"))
+    bot.send_message(chat_id, t(lang, "deal_started"))
+    bot.send_message(seller["telegram_id"], f"{t('fa', 'new_deal')}\n{p.get('name_fa')}\n#{deal['id'][:8]}", reply_markup=k)
+
+def confirm_deal(c, deal_id):
+    deal = deal_by_id(deal_id)
+    if not deal or not is_admin(c.from_user.id):
+        return
+    close_deal(deal_id, "paid")
+    customer = one("users", {"id": deal["customer_id"]})
+    p = product(deal["product_id"])
+    if customer and p:
+        deliver_product(customer["telegram_id"], p)
+        bot.send_message(customer["telegram_id"], t(lang_of(customer), "delivered"))
+    bot.send_message(c.message.chat.id, t(lang_of(get_user(c.from_user)), "approved"))
+    DEAL_CHAT.pop(c.message.chat.id, None)
+    if customer:
+        DEAL_CHAT.pop(customer["telegram_id"], None)
+
+def deliver_product(chat_id, p):
+    fid = p.get("product_file_id")
+    kind = p.get("product_file_type")
+    if fid and kind == "photo":
+        bot.send_photo(chat_id, fid)
+    elif fid and kind == "video":
+        bot.send_video(chat_id, fid)
+    elif fid:
+        bot.send_document(chat_id, fid)
+    elif p.get("digital_content"):
+        bot.send_message(chat_id, p["digital_content"])
+
+def relay_deal(m):
+    deal_id = DEAL_CHAT.get(m.chat.id)
+    if not deal_id:
+        return False
+    deal = deal_by_id(deal_id)
+    if not deal or deal.get("status") != "open":
+        DEAL_CHAT.pop(m.chat.id, None)
+        return False
+    customer = one("users", {"id": deal["customer_id"]})
+    seller = one("users", {"id": deal["seller_id"]})
+    if not customer or not seller:
+        return False
+    target = seller["telegram_id"] if m.from_user.id == customer["telegram_id"] else customer["telegram_id"]
+    label = t("fa", "from_customer") if m.from_user.id == customer["telegram_id"] else t("fa", "from_seller")
+    bot.send_message(target, f"{label}:")
+    try:
+        bot.copy_message(target, m.chat.id, m.message_id)
+    except Exception:
+        bot.send_message(target, m.text or m.caption or "")
+    return True
 
 def show_cart(chat_id, user, lang):
     items = cart(user["id"])
@@ -530,6 +682,17 @@ def show_orders(chat_id, user):
     text = "\n".join([f"#{x['id'][:8]} — {x['status']} — {x['total']}" for x in rows[:10]])
     bot.send_message(chat_id, text)
 
+def file_from_message(m):
+    if m.photo:
+        return m.photo[-1].file_id, "photo"
+    if m.video:
+        return m.video.file_id, "video"
+    if m.document:
+        return m.document.file_id, "document"
+    if m.animation:
+        return m.animation.file_id, "animation"
+    return None, None
+
 def parse_channel(text):
     parts = [x.strip() for x in text.split("|")]
     username = parts[0].lstrip("@") if parts else ""
@@ -552,6 +715,12 @@ def on_text(m):
         if kind == "add_admin":
             row = set_user_role(int(text.strip()), "admin")
             bot.send_message(m.chat.id, t(lang, "saved") if row else t(lang, "not_found"))
+        elif kind == "review":
+            add_review(state["extra"]["product_id"], user["id"], text.strip())
+            bot.send_message(m.chat.id, t(lang, "review_saved"))
+        elif kind == "report":
+            add_report(state["extra"]["product_id"], user["id"], text.strip())
+            bot.send_message(m.chat.id, t(lang, "report_saved"))
         elif kind == "add_plan":
             name_fa, name_en, days, stars = [x.strip() for x in text.split("|")]
             add_plan(name_fa, name_en, days, stars)
@@ -570,9 +739,41 @@ def on_text(m):
             extra = "\n" + (t(lang, "trial") if trial else t(lang, "trial_used"))
             bot.send_message(m.chat.id, f"{shop['title']}\n{bot_link(shop['id'])}{extra}")
         elif kind == "add_product":
-            name_fa, name_en, price, stock = [x.strip() for x in text.split("|")]
-            add_shop_product(state["extra"]["shop_id"], name_fa, name_en, price, stock)
-            bot.send_message(m.chat.id, t(lang, "saved"))
+            bot.send_message(m.chat.id, t(lang, "add_product_btn"))
+        elif kind == "prod_name_fa":
+            draft = state["extra"].get("draft") or {}
+            draft["name_fa"] = text.strip()
+            bot.send_message(m.chat.id, t(lang, "ask_name_en"))
+            expect(m.chat.id, "prod_name_en", {"draft": draft, "shop_id": state["extra"].get("shop_id")})
+        elif kind == "prod_name_en":
+            draft = state["extra"].get("draft") or {}
+            draft["name_en"] = draft["name_fa"] if text.strip() == "-" else text.strip()
+            bot.send_message(m.chat.id, t(lang, "ask_banner"))
+            expect(m.chat.id, "prod_banner", {"draft": draft, "shop_id": state["extra"].get("shop_id")})
+        elif kind == "prod_banner":
+            draft = state["extra"].get("draft") or {}
+            fid, ftype = file_from_message(m)
+            draft["banner_file_id"] = fid
+            draft["banner_type"] = ftype
+            k = types.InlineKeyboardMarkup()
+            k.add(types.InlineKeyboardButton(t(lang, "method_stars"), callback_data="pm:stars"))
+            k.add(types.InlineKeyboardButton(t(lang, "method_custom"), callback_data="pm:custom"))
+            bot.send_message(m.chat.id, t(lang, "ask_method"), reply_markup=k)
+            WAIT[m.chat.id] = {"kind": "prod_method", "extra": {"draft": draft, "shop_id": state["extra"].get("shop_id")}}
+        elif kind == "prod_stars":
+            draft = state["extra"].get("draft") or {}
+            draft["stars_price"] = int(text.strip())
+            bot.send_message(m.chat.id, t(lang, "ask_file"))
+            expect(m.chat.id, "prod_file", {"draft": draft, "shop_id": state["extra"].get("shop_id")})
+        elif kind == "prod_file":
+            draft = state["extra"].get("draft") or {}
+            fid, ftype = file_from_message(m)
+            draft["product_file_id"] = fid
+            draft["product_file_type"] = ftype
+            if not fid:
+                draft["digital_content"] = text
+            add_shop_product(state["extra"].get("shop_id"), draft)
+            bot.send_message(m.chat.id, t(lang, "product_saved"))
         elif kind == "shop_channel":
             channel_id, username = parse_channel(text)
             set_shop_channel(state["extra"]["shop_id"], channel_id, username)
@@ -628,6 +829,13 @@ def precheckout(q):
 @bot.message_handler(content_types=["successful_payment"])
 def successful_payment(m):
     payload = m.successful_payment.invoice_payload
+    if payload.startswith("prod:"):
+        _, pid, user_id = payload.split(":", 2)
+        p = product(pid)
+        if p:
+            deliver_product(m.chat.id, p)
+            bot.send_message(m.chat.id, "✅ " + t(lang_of(get_user(m.from_user)), "delivered"))
+        return
     if payload.startswith("plan:"):
         parts = payload.split(":")
         plan_id, user_id = parts[1], parts[2]
@@ -646,6 +854,12 @@ def successful_payment(m):
         if content:
             bot.send_message(m.chat.id, f"🔐 {x.get('product_name')}\n\n{content}")
 
+@bot.message_handler(content_types=["photo", "document", "video", "animation"])
+def media_step(m):
+    if m.chat.id in WAIT:
+        on_text(m)
+        return
+    relay_deal(m)
 @bot.message_handler(commands=["menu", "panel", "shops", "support"])
 def menu_commands(m):
     user = get_user(m.from_user)
@@ -728,6 +942,8 @@ def menu_text(m):
             return
         if m.chat.id in WAIT:
             on_text(m)
+            return
+        if relay_deal(m):
             return
         handle_menu(m)
     except Exception as e:
