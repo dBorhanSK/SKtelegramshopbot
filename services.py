@@ -213,16 +213,65 @@ def create_shop(user, title):
 def shop_products(shop_id):
     return table("products").select("*").eq("shop_id", shop_id).eq("active", True).order("created_at", desc=True).execute().data
 
-def add_shop_product(shop_id, name_fa, name_en, price, stock):
-    res = table("products").insert({
+def add_shop_product(shop_id, payload):
+    data = {
         "shop_id": shop_id,
-        "name_fa": name_fa,
-        "name_en": name_en,
-        "price": price,
-        "stock": stock,
+        "name_fa": payload["name_fa"],
+        "name_en": payload.get("name_en") or payload["name_fa"],
+        "price": payload.get("stars_price") or 0,
+        "stars_price": payload.get("stars_price") or 0,
+        "stock": 999,
         "active": True,
+        "pay_method": payload.get("pay_method") or "stars",
+        "banner_file_id": payload.get("banner_file_id"),
+        "banner_type": payload.get("banner_type"),
+        "product_file_id": payload.get("product_file_id"),
+        "product_file_type": payload.get("product_file_type"),
+        "digital_content": payload.get("digital_content"),
+    }
+    res = table("products").insert(data).execute()
+    return res.data[0] if res.data else None
+
+def set_shop_pay_method(shop_id, method):
+    return table("shops").update({"pay_method": method}).eq("id", shop_id).execute()
+
+def product_method(p, shop=None):
+    return (p or {}).get("pay_method") or (shop or {}).get("pay_method") or "stars"
+
+def create_deal(product_row, customer, seller):
+    res = table("deals").insert({
+        "product_id": product_row["id"],
+        "shop_id": product_row.get("shop_id"),
+        "customer_id": customer["id"],
+        "seller_id": seller["id"],
+        "status": "open",
     }).execute()
     return res.data[0] if res.data else None
+
+def deal_by_id(deal_id):
+    return one("deals", {"id": deal_id})
+
+def close_deal(deal_id, status):
+    return table("deals").update({"status": status}).eq("id", deal_id).execute()
+
+def add_review(product_id, user_id, comment):
+    existing = table("product_reviews").select("*").eq("product_id", product_id).eq("user_id", user_id).limit(1).execute().data
+    payload = {"product_id": product_id, "user_id": user_id, "rating": 5, "comment": comment}
+    if existing:
+        return table("product_reviews").update({"comment": comment}).eq("id", existing[0]["id"]).execute()
+    return table("product_reviews").insert(payload).execute()
+
+def add_report(product_id, user_id, reason):
+    return table("product_reports").insert({
+        "product_id": product_id,
+        "user_id": user_id,
+        "reason": reason,
+    }).execute()
+
+def product_feedback(product_id):
+    reviews = table("product_reviews").select("comment,created_at").eq("product_id", product_id).order("created_at", desc=True).limit(5).execute().data
+    reports = table("product_reports").select("reason,created_at").eq("product_id", product_id).order("created_at", desc=True).limit(5).execute().data
+    return reviews, reports
 
 def set_shop_channel(shop_id, channel_id, username):
     return table("shops").update({
