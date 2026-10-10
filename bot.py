@@ -111,13 +111,15 @@ def chat_menu(lang, role):
     k = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
     if role == "owner":
         k.row(t(lang, "owner_btn"), t(lang, "income_btn"))
-        k.row(t(lang, "shop"), t(lang, "channels_btn"))
-        k.row(t(lang, "plans_btn"), t(lang, "language"))
-        k.row(t(lang, "manage_orders_btn"))
+        k.row(t(lang, "admins"), t(lang, "admin_stats"))
+        k.row(t(lang, "shops"), t(lang, "channels"))
+        k.row(t(lang, "plans"), t(lang, "manage_orders_btn"))
+        k.row(t(lang, "my_support"), t(lang, "language"))
     elif role == "seller":
         k.row(t(lang, "admin_btn"), t(lang, "my_sub_btn"))
         k.row(t(lang, "my_shop_btn"), t(lang, "products_btn"))
         k.row(t(lang, "manage_orders_btn"), t(lang, "my_channel_btn"))
+        k.row(t(lang, "pay_method"), t(lang, "my_support"))
         k.row(t(lang, "language"))
     else:
         k.row(t(lang, "shop"), t(lang, "cart"))
@@ -1161,7 +1163,30 @@ def callback(c):
             set_setting("global_channel_username", "")
             bot.send_message(c.message.chat.id, t(lang, "saved"))
     elif data.startswith("os:"):
-        show_shop_products_text(c.message.chat.id, data.split(":", 1)[1], lang)
+        show_owner_shop(c.message.chat.id, user, c.from_user.id, lang, data.split(":", 1)[1])
+    elif data.startswith("ds:"):
+        # delete shop confirm
+        shop_id = data.split(":", 1)[1]
+        k = types.InlineKeyboardMarkup()
+        k.row(types.InlineKeyboardButton(t(lang, "yes_btn"), callback_data=f"dxy:{shop_id}"),
+              types.InlineKeyboardButton(t(lang, "no_btn"), callback_data="home"))
+        bot.send_message(c.message.chat.id, t(lang, "confirm_delete_shop"), reply_markup=k)
+    elif data.startswith("dxy:"):
+        shop_id = data.split(":", 1)[1]
+        shop = shop_by_id(shop_id)
+        if shop and (is_owner(c.from_user.id) or (my_shop(user["id"]) and my_shop(user["id"])["id"] == shop_id)):
+            deactivate_shop(shop_id)
+            bot.send_message(c.message.chat.id, t(lang, "shop_deleted"))
+        else:
+            bot.send_message(c.message.chat.id, t(lang, "not_allowed"))
+    elif data.startswith("sc:"):
+        shop_id = data.split(":", 1)[1]
+        bot.send_message(c.message.chat.id, t(lang, "send_channel"))
+        expect(c.message.chat.id, "shop_channel", {"shop_id": shop_id})
+    elif data.startswith("cc:"):
+        shop_id = data.split(":", 1)[1]
+        clear_shop_channel(shop_id)
+        bot.send_message(c.message.chat.id, t(lang, "channel_cleared"))
     elif data == "sub:cancel":
         cancel_subscription(user["id"])
         bot.send_message(c.message.chat.id, t(lang, "saved"))
@@ -1205,7 +1230,7 @@ def owner_action(c, user, lang, action):
         ) or "-")
         bot.send_message(chat_id, text[:4000])
     elif action == "shops":
-        rows = all_shops()
+        rows = [s for s in all_shops() if s.get("active", True)]
         if not rows:
             bot.send_message(chat_id, t(lang, "no_shops"))
             return
@@ -1256,7 +1281,9 @@ def seller_action(c, user, lang, action):
             bot.send_message(chat_id, t(lang, "send_shop"))
             expect(chat_id, "create_shop", {"user": user})
             return
-        bot.send_message(chat_id, f"{shop['title']}\n{t(lang, 'link')}: {bot_link(shop['id'])}")
+        k = types.InlineKeyboardMarkup()
+        k.add(types.InlineKeyboardButton(t(lang, "delete_shop"), callback_data=f"ds:{shop['id']}"))
+        bot.send_message(chat_id, f"{esc(shop['title'])}\n{t(lang, 'link')}: {bot_link(shop['id'])}", reply_markup=k)
     elif action == "products":
         if not shop:
             bot.send_message(chat_id, t(lang, "send_shop"))
@@ -1304,8 +1331,13 @@ def seller_action(c, user, lang, action):
         if not shop:
             bot.send_message(chat_id, t(lang, "send_shop"))
             return
-        bot.send_message(chat_id, t(lang, "send_channel"))
-        expect(chat_id, "shop_channel", {"shop_id": shop["id"]})
+        curr = shop.get("required_channel_username") or shop.get("required_channel_id") or ""
+        text = t(lang, "current_channel") + " " + (curr or t(lang, "no_channel"))
+        k = types.InlineKeyboardMarkup()
+        k.add(types.InlineKeyboardButton(t(lang, "set_channel"), callback_data=f"sc:{shop['id']}"))
+        if curr:
+            k.add(types.InlineKeyboardButton(t(lang, "clear_channel"), callback_data=f"cc:{shop['id']}"))
+        bot.send_message(chat_id, text, reply_markup=k)
     elif action == "support":
         bot.send_message(chat_id, t(lang, "send_support"))
         expect(chat_id, "seller_support", {"user": user})
@@ -1361,6 +1393,22 @@ def show_shop_products_text(chat_id, shop_id, lang="fa"):
         return
     lines = [f"• {esc(pname(lang, p))} — {product_price_stars(p) or p.get('price')}" for p in shop_products(shop_id)]
     bot.send_message(chat_id, f"{esc(shop['title'])}\n" + ("\n".join(lines) or "-"))
+
+def show_owner_shop(chat_id, user, tg_id, lang, shop_id):
+    if not is_owner(tg_id):
+        bot.send_message(chat_id, t(lang, "admin_only"))
+        return
+    shop = shop_by_id(shop_id)
+    if not shop or not shop.get("active", True):
+        bot.send_message(chat_id, t(lang, "not_found"))
+        return
+    text = f"<b>{esc(shop['title'])}</b>\nOwner: {shop.get('owner_user_id')}\n{t(lang, 'link')}: {bot_link(shop['id'])}"
+    k = types.InlineKeyboardMarkup()
+    k.add(types.InlineKeyboardButton(t(lang, "delete_shop"), callback_data=f"ds:{shop_id}"))
+    for p in shop_products(shop_id)[:15]:
+        k.add(types.InlineKeyboardButton("🗑 " + trunc(pname(lang, p), 30), callback_data=f"mp:{p['id']}"))
+    k.add(types.InlineKeyboardButton(t(lang, "back"), callback_data="own:shops"))
+    bot.send_message(chat_id, text, reply_markup=k)
 
 def type_short_of(lang, p):
     return t(lang, "type_physical_short" if is_physical(p) else "type_digital_short")
@@ -1930,7 +1978,7 @@ class Click:
         self.id = "0"
         self.data = ""
 
-MENU_KEYS = ("owner_btn", "admin_btn", "switch_panel", "income_btn", "shop", "channels_btn", "plans_btn", "my_sub_btn", "my_shop_btn", "products_btn", "my_channel_btn", "cart", "orders", "support", "language", "manage_orders_btn")
+MENU_KEYS = ("owner_btn", "admin_btn", "switch_panel", "income_btn", "shop", "shops", "channels", "channels_btn", "plans", "plans_btn", "my_sub_btn", "my_shop_btn", "products_btn", "my_channel_btn", "cart", "orders", "support", "language", "manage_orders_btn", "admins", "admin_stats", "my_support", "pay_method")
 
 def is_exact_menu_text(text):
     """Only the real keyboard buttons. Used while a form is open, so a review or an
@@ -1966,15 +2014,26 @@ def handle_menu(m):
         owner_action(fake, user, lang, "revenue")
     elif text in labels("my_shop_btn") or "فروشگاه من" in folded or "my shop" in folded:
         seller_action(fake, user, lang, "shop")
-    elif text in labels("shop") or folded in ("فروشگاه‌ها", "فروشگاه ها", "shops"):
+    elif text in labels("shop", "shops") or folded in ("فروشگاه‌ها", "فروشگاه ها", "shops"):
         if is_owner(m.from_user.id):
             owner_action(fake, user, lang, "shops")
         else:
             customer_action(fake, user, lang, "shops")
-    elif text in labels("channels_btn") or folded in ("کانال‌ها", "کانال ها", "channels"):
+    elif text in labels("channels_btn", "channels") or folded in ("کانال‌ها", "کانال ها", "channels"):
         owner_action(fake, user, lang, "channels")
-    elif text in labels("plans_btn") or folded in ("اشتراک‌ها", "اشتراک ها", "plans"):
+    elif text in labels("plans_btn", "plans") or folded in ("اشتراک‌ها", "اشتراک ها", "plans"):
         owner_action(fake, user, lang, "plans")
+    elif text in labels("admins") or "ادمین" in folded or "admins" in folded:
+        owner_action(fake, user, lang, "admins")
+    elif text in labels("admin_stats") or "آمار" in folded or "stats" in folded:
+        owner_action(fake, user, lang, "stats")
+    elif text in labels("my_support") or "پشتیبانی من" in folded or "my support" in folded or "support id" in folded:
+        if is_owner(m.from_user.id):
+            owner_action(fake, user, lang, "support")
+        else:
+            seller_action(fake, user, lang, "support")
+    elif text in labels("pay_method") or "شیوه" in folded or "method" in folded or "sales method" in folded:
+        seller_action(fake, user, lang, "method")
     elif text in labels("my_sub_btn") or "اشتراک من" in folded or "my subscription" in folded:
         seller_action(fake, user, lang, "sub")
     elif text in labels("products_btn") or folded in ("محصولات", "products"):
