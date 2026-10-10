@@ -187,7 +187,8 @@ def customer_orders(user_id):
     return table("orders").select("*").eq("user_id", user_id).order("created_at", desc=True).execute().data
 
 def my_shop(user_id):
-    return one("shops", {"owner_user_id": user_id})
+    rows = table("shops").select("*").eq("owner_user_id", user_id).eq("active", True).limit(1).execute().data
+    return rows[0] if rows else None
 
 def all_shops():
     return table("shops").select("*").order("created_at", desc=True).execute().data
@@ -461,6 +462,11 @@ def set_product_stock(product_id, stock):
 
 def deactivate_product(product_id):
     return table("products").update({"active": False}).eq("id", product_id).execute()
+
+def deactivate_shop(shop_id):
+    # also deactivate products
+    table("products").update({"active": False}).eq("shop_id", shop_id).execute()
+    return table("shops").delete().eq("id", shop_id).execute()
 
 def deduct_stock(product_id, qty):
     """Atomic (compare-and-swap) stock decrement. False when there isn't enough."""
