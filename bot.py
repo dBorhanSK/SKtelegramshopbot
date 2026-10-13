@@ -423,7 +423,9 @@ def order_markup(lang, o, role, has_digital, deal):
     k = types.InlineKeyboardMarkup()
     oid, st = o["id"], o.get("status")
     paid = o.get("payment_status") == "paid"
-    if role == "customer":
+    if role == "owner":
+        k.add(types.InlineKeyboardButton("🗑 پاک‌کردن از تاریخچه" if lang == "fa" else "🗑 Delete from history", callback_data=f"delorder:{oid}"))
+    elif role == "customer":
         if st == "pending" and not paid:
             if o.get("payment_method") in ("stars", "card"):
                 k.add(types.InlineKeyboardButton(t(lang, "btn_pay_now"), callback_data=f"po:{oid}"))
@@ -432,7 +434,8 @@ def order_markup(lang, o, role, has_digital, deal):
             k.add(types.InlineKeyboardButton(t(lang, "btn_resend"), callback_data=f"rd:{oid}"))
         if st == "shipped":
             k.add(types.InlineKeyboardButton(t(lang, "btn_received"), callback_data=f"rc:{oid}"))
-    else:
+    elif role == "seller":
+        k.add(types.InlineKeyboardButton("🗑 حذف از تاریخچه" if lang == "fa" else "🗑 Delete from history", callback_data=f"delorder:{oid}"))
         if o.get("requires_shipping") and paid and st in ("paid", "shipped"):
             k.add(types.InlineKeyboardButton(t(lang, "btn_mark_shipped"), callback_data=f"sg:{oid}"))
             if st == "paid":
@@ -452,6 +455,25 @@ def show_order(chat_id, user, tg_id, lang, order_id):
     deal = deal_for_order(order_id) if (role != "customer" and o.get("payment_method") == "custom") else None
     has_digital = any(it.get("product_type") != "physical" for it in items)
     bot.send_message(chat_id, order_card(lang, o, items, role), reply_markup=order_markup(lang, o, role, has_digital, deal))
+
+def delete_order_history(chat_id, user, tg_id, lang, order_id):
+    o = order_by_id(order_id)
+    role = order_role(user, tg_id, o) if o else None
+    if not o or role not in ("owner", "seller"):
+        bot.send_message(chat_id, t(lang, "not_allowed"))
+        return
+    # Only remove history records; never trigger a payment/refund action.
+    try:
+        table("order_items").delete().eq("order_id", order_id).execute()
+        table("deals").delete().eq("order_id", order_id).execute()
+        result = table("orders").delete().eq("id", order_id).execute()
+        if not getattr(result, "data", None):
+            bot.send_message(chat_id, t(lang, "not_found"))
+            return
+        bot.send_message(chat_id, "✅ سفارش از تاریخچه حذف شد." if lang == "fa" else "✅ Order removed from history.")
+    except Exception as e:
+        print("delete order history failed:", e)
+        bot.send_message(chat_id, "حذف انجام نشد؛ احتمالاً ارتباط دیتابیس یا محدودیت رابطه‌هاست." if lang == "fa" else "Could not delete; check database relations.")
 
 def show_manage_orders(chat_id, user, tg_id, lang, flt="all"):
     if is_owner(tg_id):
@@ -665,7 +687,7 @@ def ask_cancel_order(chat_id, user, tg_id, lang, order_id):
         (role == "customer" and not paid and o.get("status") == "pending") or
         (role in ("seller", "owner") and not paid and o.get("status") == "pending") or
         (role in ("seller", "owner") and paid and o.get("status") == "paid" and o.get("requires_shipping")))
-    if not ok:
+    if role == "owner" or not ok:
         bot.send_message(chat_id, t(lang, "not_allowed"))
         return
     q = t(lang, "confirm_refund_q" if (paid and o.get("payment_method") == "stars") else "confirm_cancel_q")
@@ -955,6 +977,10 @@ def start(m):
         ask_language(m.chat.id)
         return
     continue_onboarding(m.chat.id, user, m.from_user.id)
+    try:
+        bot.send_message(m.chat.id, " ", reply_markup=types.ReplyKeyboardRemove())
+    except Exception:
+        pass
 
 def open_pending_or_home(chat_id, user, tg_id):
     shop_id = PENDING_SHOP.pop(chat_id, None)
@@ -1103,6 +1129,9 @@ def callback(c):
         return
     if data.startswith("od:"):
         show_order(chat_id, user, c.from_user.id, lang, data.split(":", 1)[1])
+        return
+    if data.startswith("delorder:"):
+        delete_order_history(chat_id, user, c.from_user.id, lang, data.split(":", 1)[1])
         return
     if data.startswith("ol:"):
         show_manage_orders(chat_id, user, c.from_user.id, lang, data.split(":", 1)[1])
