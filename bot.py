@@ -151,6 +151,8 @@ def setup_commands():
             types.BotCommand("shops", "Shops"),
             types.BotCommand("support", "Support"),
         ])
+        # The Telegram menu icon opens the bot command list.
+        bot.set_chat_menu_button(menu_button=types.MenuButtonCommands())
     except Exception as e:
         print("commands:", e)
 
@@ -240,6 +242,7 @@ def send_home(chat_id, user, tg_id):
         box(title, t(lang, "welcome") + sub + "\n\n" + t(lang, "choose")),
         reply_markup=markup,
     )
+    # No persistent ReplyKeyboard: the inline menu above stays in the chat message.
 
 def member_of(channel_id, user_id):
     if not channel_id:
