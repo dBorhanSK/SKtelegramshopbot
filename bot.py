@@ -240,7 +240,6 @@ def send_home(chat_id, user, tg_id):
         box(title, t(lang, "welcome") + sub + "\n\n" + t(lang, "choose")),
         reply_markup=markup,
     )
-    bot.send_message(chat_id, t(lang, "menu_ready"), reply_markup=chat_menu(lang, role))
 
 def member_of(channel_id, user_id):
     if not channel_id:
