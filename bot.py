@@ -108,7 +108,9 @@ def labels(*keys):
     return {t("fa", key) for key in keys} | {t("en", key) for key in keys}
 
 def chat_menu(lang, role):
-    k = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
+    """Reply keyboard that the person controls: Telegram's keyboard icon collapses/expands it,
+    the last button removes it, and /menu brings it back. (is_persistent=False on purpose.)"""
+    k = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=False)
     if role == "owner":
         k.row(t(lang, "owner_btn"), t(lang, "income_btn"))
         k.row(t(lang, "admins"), t(lang, "admin_stats"))
@@ -121,15 +123,66 @@ def chat_menu(lang, role):
         k.row(t(lang, "manage_orders_btn"), t(lang, "my_channel_btn"))
         k.row(t(lang, "pay_method"), t(lang, "my_support"))
         k.row(t(lang, "language"))
+    elif role == "locked":      # admin whose subscription ended: only renew + language
+        k.row(t(lang, "admin_btn"), t(lang, "my_sub_btn"))
+        k.row(t(lang, "language"), t(lang, "switch_panel"))
     else:
         k.row(t(lang, "shop"), t(lang, "cart"))
         k.row(t(lang, "orders"), t(lang, "support"))
         k.row(t(lang, "language"), t(lang, "switch_panel"))
+    k.row(t(lang, "close_menu"))
     return k
+
+def kb_key(tg_id):
+    return f"kb:{int(tg_id)}"
+
+def show_reply_keyboard(chat_id, lang, role, tg_id, force=False):
+    """Sends the reply keyboard once (again only if language/role changed or /menu was used).
+    Stays hidden if the person closed it."""
+    try:
+        state = get_setting(kb_key(tg_id), "")
+        want = f"{lang}:{role}"
+        if not force and (state == "closed" or state == want):
+            return
+        bot.send_message(chat_id, t(lang, "menu_open"), reply_markup=chat_menu(lang, role))
+        set_setting(kb_key(tg_id), want)
+    except Exception as e:
+        print("reply keyboard:", e)
+
+def close_reply_keyboard(m):
+    user = get_user(m.from_user)
+    lang = lang_of(user)
+    try:
+        set_setting(kb_key(m.from_user.id), "closed")
+    except Exception as e:
+        print("kb flag:", e)
+    bot.send_message(m.chat.id, t(lang, "menu_closed"), reply_markup=types.ReplyKeyboardRemove())
+
+def role_for_keyboard(tg_id, user=None):
+    user = user or one("users", {"telegram_id": int(tg_id)})
+    if is_owner(tg_id):
+        return "owner"
+    if has_admin_role(user):
+        return "seller" if has_admin_access(tg_id) else "locked"
+    return "customer"
+
+def push_access_change(tg_id, text_key, **kw):
+    """Tells a person their admin access changed and refreshes their keyboard (unless closed)."""
+    lang = lang_of_tg(tg_id)
+    markup = None
+    try:
+        if get_setting(kb_key(tg_id), "") != "closed":
+            role = role_for_keyboard(tg_id)
+            markup = chat_menu(lang, role)
+            set_setting(kb_key(tg_id), f"{lang}:{role}")
+    except Exception as e:
+        print("push markup:", e)
+    notify(tg_id, tf(lang, text_key, **kw), markup)
 
 def role_commands(lang, role):
     fa = lang == "fa"
-    cmds = [("panel", "باز کردن پنل" if fa else "Open panel"),
+    cmds = [("menu", "باز/بسته کردن منو" if fa else "Open menu"),
+            ("panel", "باز کردن پنل" if fa else "Open panel"),
             ("shops", "فروشگاه‌ها" if fa else "Shops"),
             ("support", "پشتیبانی" if fa else "Support"),
             ("switch", "تغییر پنل" if fa else "Switch panel"),
@@ -152,6 +205,7 @@ def setup_commands():
     try:
         bot.set_my_commands([
             types.BotCommand("start", "شروع و انتخاب زبان"),
+            types.BotCommand("menu", "باز کردن منو"),
             types.BotCommand("panel", "باز کردن پنل"),
             types.BotCommand("switch", "تغییر پنل"),
             types.BotCommand("shops", "فروشگاه‌ها"),
@@ -159,6 +213,7 @@ def setup_commands():
         ], language_code="fa")
         bot.set_my_commands([
             types.BotCommand("start", "Start and choose language"),
+            types.BotCommand("menu", "Open menu"),
             types.BotCommand("panel", "Open panel"),
             types.BotCommand("switch", "Switch panel"),
             types.BotCommand("shops", "Shops"),
@@ -167,6 +222,7 @@ def setup_commands():
         # everyone whose Telegram language is neither fa nor en gets the English list
         bot.set_my_commands([
             types.BotCommand("start", "Start and choose language"),
+            types.BotCommand("menu", "Open menu"),
             types.BotCommand("panel", "Open panel"),
             types.BotCommand("switch", "Switch panel"),
             types.BotCommand("shops", "Shops"),
@@ -219,7 +275,7 @@ def ask_language(chat_id):
 def role_of(user, tg_id):
     if is_owner(tg_id):
         return "owner"
-    if is_seller(user):
+    if has_admin_role(user):
         return "seller"
     return "customer"
 
@@ -257,34 +313,49 @@ def kb_customer(lang):
     k.row(types.InlineKeyboardButton(t(lang, "language"), callback_data="language"))
     return k
 
+def kb_locked(lang):
+    k = types.InlineKeyboardMarkup()
+    k.row(types.InlineKeyboardButton(t(lang, "renew"), callback_data="sel:renew"))
+    k.row(types.InlineKeyboardButton(t(lang, "my_sub"), callback_data="sel:sub"))
+    k.row(types.InlineKeyboardButton(t(lang, "language"), callback_data="language"))
+    return k
+
 def send_home(chat_id, user, tg_id):
     lang = lang_of(user)
     chosen = panel_of(tg_id)
-    if chosen == "admin":
+    if int(tg_id) == OWNER_ID or is_owner(tg_id):
+        role = "seller" if chosen == "admin" else "owner"
+    elif chosen == "admin" or has_admin_role(user):
         role = "seller"
-    elif int(tg_id) == OWNER_ID or is_owner(tg_id):
-        role = "owner"
     else:
         role = "customer"
-    title = {"owner": t(lang, "owner_btn"), "seller": t(lang, "admin_btn")}.get(role, t(lang, "customer_btn"))
-    markup = {"owner": kb_owner(lang), "seller": kb_seller(lang)}.get(role, kb_customer(lang))
+    if role == "seller" and not has_admin_access(tg_id):
+        role = "locked"          # subscription ended: no admin tools until renewed
+    title = {"owner": t(lang, "owner_btn"), "seller": t(lang, "admin_btn"), "locked": t(lang, "admin_btn")}.get(role, t(lang, "customer_btn"))
+    markup = {"owner": kb_owner(lang), "seller": kb_seller(lang), "locked": kb_locked(lang)}.get(role, kb_customer(lang))
     sub = ""
-    if role == "seller":
+    if role in ("seller", "locked"):
         active = active_subscription(user["id"])
-        sub = "\n⭐ " + t(lang, "sub_active") + " " + fmt_date(lang, active["ends_at"]) if active else "\n⛔ " + t(lang, "sub_expired")
-        try:
-            waiting = count_to_ship(user["id"])
-        except Exception:
-            waiting = 0
-        if waiting:
-            sub += "\n🚚 " + t(lang, "to_ship_count") + ": " + num(lang, waiting)
+        if is_exempt(tg_id):
+            sub = "\n♾ " + t(lang, "sub_exempt")
+        elif active:
+            sub = "\n⭐ " + t(lang, "sub_active") + " " + fmt_date(lang, active["ends_at"])
+        else:
+            sub = "\n⛔ " + t(lang, "sub_expired")
+        if role == "seller":
+            try:
+                waiting = count_to_ship(user["id"])
+            except Exception:
+                waiting = 0
+            if waiting:
+                sub += "\n🚚 " + t(lang, "to_ship_count") + ": " + num(lang, waiting)
     bot.send_message(
         chat_id,
         box(title, t(lang, "welcome") + sub + "\n\n" + t(lang, "choose")),
         reply_markup=markup,
     )
     refresh_chat_menu(chat_id, lang, role)
-    # No persistent ReplyKeyboard: the inline menu above stays in the chat message.
+    show_reply_keyboard(chat_id, lang, role, tg_id)
 
 def norm_channel(channel_id):
     c = str(channel_id).strip()
@@ -430,7 +501,7 @@ def gate_onboarding(m, user):
 def order_role(user, tg_id, o):
     if o.get("user_id") == user["id"]:
         return "customer"
-    if o.get("seller_id") and o["seller_id"] == user["id"]:
+    if o.get("seller_id") and o["seller_id"] == user["id"] and has_admin_access(tg_id):
         return "seller"
     if is_owner(tg_id):
         return "owner"
@@ -531,7 +602,7 @@ def show_manage_orders(chat_id, user, tg_id, lang, flt="all"):
     if is_owner(tg_id):
         rows = all_order_rows(only_ship=(flt == "ship"))
         waiting = count_to_ship()
-    elif my_shop(user["id"]) or is_seller(user):
+    elif is_seller(user):
         rows = seller_order_rows(user["id"], only_ship=(flt == "ship"))
         waiting = count_to_ship(user["id"])
     else:
@@ -1028,12 +1099,35 @@ def start(m):
     if not user.get("language_set"):
         ask_language(m.chat.id)
         return
-    try:   # remove any old keyboard (a blank text is rejected by Telegram, so use a dot and delete it)
-        tmp = bot.send_message(m.chat.id, ".", reply_markup=types.ReplyKeyboardRemove())
-        bot.delete_message(m.chat.id, tmp.message_id)
-    except Exception:
-        pass
     continue_onboarding(m.chat.id, user, m.from_user.id)
+
+def admin_label(lang, r):
+    icon = {"active": "⭐", "exempt": "♾", "expired": "⛔"}.get(r["status"], "•")
+    name = r.get("first_name") or (("@" + r["username"]) if r.get("username") else "")
+    tail = ""
+    if r["status"] == "active" and r.get("ends_at"):
+        tail = " · " + fmt_date(lang, r["ends_at"], with_time=False)
+    return f"{icon} {name} {r['telegram_id']}{tail}".replace("  ", " ")
+
+def show_admin_card(chat_id, lang, tg):
+    r = admin_info(tg)
+    if not r:
+        bot.send_message(chat_id, t(lang, "not_found"))
+        return
+    status = {"exempt": t(lang, "adm_status_exempt"), "expired": t(lang, "adm_status_expired")}.get(r["status"])
+    if r["status"] == "active":
+        status = t(lang, "adm_status_active") + " " + fmt_date(lang, r["ends_at"], with_time=False)
+    who = esc(r.get("first_name") or "-") + ((" @" + esc(r["username"])) if r.get("username") else "")
+    text = f"👤 {who}\n{t(lang, 'adm_id')}: <code>{r['telegram_id']}</code>\n{status}"
+    k = types.InlineKeyboardMarkup()
+    k.row(*[types.InlineKeyboardButton(tf(lang, "adm_days_btn", n=num(lang, d)), callback_data=f"amg:{tg}:{d}") for d in (30, 90, 365)])
+    k.add(types.InlineKeyboardButton(t(lang, "adm_custom_days"), callback_data=f"amc:{tg}"))
+    if r["status"] == "active":
+        k.add(types.InlineKeyboardButton(t(lang, "adm_cancel_sub"), callback_data=f"amx:{tg}"))
+    k.add(types.InlineKeyboardButton(t(lang, "adm_exempt_off") if r["exempt"] else t(lang, "adm_exempt_on"), callback_data=f"ame:{tg}"))
+    k.add(types.InlineKeyboardButton(t(lang, "adm_remove"), callback_data=f"ra:{tg}"))
+    k.add(types.InlineKeyboardButton(t(lang, "back"), callback_data="own:admins"))
+    bot.send_message(chat_id, text, reply_markup=k)
 
 def open_pending_or_home(chat_id, user, tg_id):
     shop_id = PENDING_SHOP.pop(chat_id, None)
@@ -1066,7 +1160,7 @@ def callback(c):
             return
         if choice == "admin":
             trial = accept_admin(user)
-            note = t(lang, "trial") if trial else t(lang, "trial_used")
+            note = "" if TRIAL_DAYS <= 0 else (t(lang, "trial") if trial else t(lang, "trial_used"))
             bot.send_message(c.message.chat.id, t(lang, "accepted_admin") + "\n" + note)
         elif choice == "customer":
             set_panel(c.from_user.id, "customer")
@@ -1080,6 +1174,11 @@ def callback(c):
         return
     if data == "language":
         ask_language(c.message.chat.id)
+        return
+    # Old inline buttons must stop working the moment admin access ends.
+    if data.startswith(("mp:", "ms:", "mr:", "mx:", "ds:", "dxy:", "sc:", "cc:", "spm:", "pt:", "pm:", "sg:")) \
+            and not has_admin_access(c.from_user.id):
+        bot.send_message(c.message.chat.id, "⛔ " + t(lang, "sub_expired"))
         return
     if data == "home":
         send_home(c.message.chat.id, user, c.from_user.id)
@@ -1104,7 +1203,7 @@ def callback(c):
         owner_action(c, user, lang, data.split(":", 1)[1])
         return
     if data.startswith("sel:"):
-        if not is_seller(user) and not is_owner(c.from_user.id):
+        if not has_admin_role(user) and not is_owner(c.from_user.id):
             bot.send_message(c.message.chat.id, t(lang, "admin_only"))
             return
         seller_action(c, user, lang, data.split(":", 1)[1])
@@ -1246,9 +1345,40 @@ def callback(c):
     elif data.startswith("ra:"):
         if is_owner(c.from_user.id):
             tg = int(data.split(":", 1)[1])
-            set_user_role(tg, "user")
-            set_setting(f"exempt_sub:{tg}", "")
+            if revoke_admin(tg):
+                push_access_change(tg, "admin_removed")
             bot.send_message(c.message.chat.id, t(lang, "saved"))
+            owner_action(c, user, lang, "admins")
+    elif data.startswith(("am:", "amg:", "amc:", "amx:", "ame:")):
+        if not is_owner(c.from_user.id):
+            bot.send_message(c.message.chat.id, t(lang, "admin_only"))
+            return
+        parts = data.split(":")
+        cmd, tg = parts[0], int(parts[1])
+        chat_id = c.message.chat.id
+        if cmd == "am":
+            show_admin_card(chat_id, lang, tg)
+        elif cmd == "amg":
+            ends = grant_days(tg, int(parts[2]))
+            push_access_change(tg, "sub_granted", date=fmt_date(lang_of_tg(tg), ends.isoformat(), with_time=False))
+            bot.send_message(chat_id, t(lang, "saved"))
+            show_admin_card(chat_id, lang, tg)
+        elif cmd == "amc":
+            bot.send_message(chat_id, t(lang, "ask_days"))
+            expect(chat_id, "grant_days", {"tg": tg})
+        elif cmd == "amx":
+            cancel_admin_subscription(tg)
+            push_access_change(tg, "sub_revoked")
+            bot.send_message(chat_id, t(lang, "saved"))
+            show_admin_card(chat_id, lang, tg)
+        elif cmd == "ame":
+            if is_exempt(tg):
+                set_exempt(tg, False)
+                push_access_change(tg, "exempt_off_note")
+            else:
+                appoint_admin(tg)
+                push_access_change(tg, "admin_appointed")
+            show_admin_card(chat_id, lang, tg)
     elif data.startswith("dc:"):
         if is_owner(c.from_user.id):
             clear_shop_channel(data.split(":", 1)[1])
@@ -1300,14 +1430,13 @@ def callback(c):
 def owner_action(c, user, lang, action):
     chat_id = c.message.chat.id
     if action == "admins":
+        rows = admin_directory()
         k = types.InlineKeyboardMarkup()
-        for row in list_admins():
-            if row.get("telegram_id") in ADMIN_IDS:
-                continue
-            k.add(types.InlineKeyboardButton(f"❌ {row.get('telegram_id')}", callback_data=f"ra:{row.get('telegram_id')}"))
+        for r in rows[:40]:
+            k.add(types.InlineKeyboardButton(trunc(admin_label(lang, r), 60), callback_data=f"am:{r['telegram_id']}"))
         k.add(types.InlineKeyboardButton(t(lang, "add_admin"), callback_data="own:add_admin"))
         k.add(types.InlineKeyboardButton(t(lang, "back"), callback_data="home"))
-        bot.send_message(chat_id, t(lang, "admins"), reply_markup=k)
+        bot.send_message(chat_id, t(lang, "admins") + f" ({num(lang, len(rows))})\n\n" + t(lang, "admins_hint"), reply_markup=k)
     elif action == "add_admin":
         bot.send_message(chat_id, t(lang, "send_admin_id"))
         expect(chat_id, "add_admin")
@@ -1375,8 +1504,12 @@ def owner_action(c, user, lang, action):
 def seller_action(c, user, lang, action):
     chat_id = c.message.chat.id
     # Owner and admins explicitly appointed by the owner are exempt from subscription.
-    exempt = is_owner(user.get("telegram_id")) or get_setting(f"exempt_sub:{user.get('telegram_id')}") == "yes"
-    if action not in ("sub", "renew", "method", "orders") and not active_subscription(user["id"]) and not exempt:
+    tg = user.get("telegram_id")
+    if not is_owner(tg) and not has_admin_role(user):
+        bot.send_message(chat_id, t(lang, "admin_only"))
+        return
+    # Only subscription screens stay open after the subscription ends.
+    if action not in ("sub", "renew") and not has_admin_access(tg):
         bot.send_message(chat_id, "⛔ " + t(lang, "sub_expired"))
         seller_action(c, user, lang, "renew")
         return
@@ -1854,13 +1987,39 @@ def on_text(m):
     lang = lang_of(user)
     kind = state["kind"]
     text = m.text or m.caption or ""
+    if kind in ("create_shop", "add_product", "prod_name_fa", "prod_name_en", "prod_desc", "prod_banner",
+                "prod_stars", "prod_stock", "stock_edit", "prod_file", "ship_track", "shop_channel",
+                "seller_support", "prod_type", "prod_method") and not has_admin_access(m.from_user.id):
+        bot.send_message(m.chat.id, "⛔ " + t(lang, "sub_expired"))
+        return
+    if kind in ("add_admin", "grant_days") and not is_owner(m.from_user.id):
+        bot.send_message(m.chat.id, t(lang, "not_allowed"))
+        return
     try:
         if kind == "add_admin":
-            tg = int(text.strip())
-            row = set_user_role(tg, "admin")
+            raw = to_ascii_digits(text.strip())
+            if not raw.isdigit() or int(raw) <= 0:
+                bot.send_message(m.chat.id, t(lang, "bad_id"))
+                return
+            tg = int(raw)
+            row = appoint_admin(tg)
             if row:
-                set_setting(f"exempt_sub:{tg}", "yes")
-            bot.send_message(m.chat.id, t(lang, "saved") if row else t(lang, "not_found"))
+                bot.send_message(m.chat.id, t(lang, "admin_added_ok"))
+                push_access_change(tg, "admin_appointed")
+                show_admin_card(m.chat.id, lang, tg)
+            else:
+                bot.send_message(m.chat.id, t(lang, "not_found"))
+        elif kind == "grant_days":
+            raw = to_ascii_digits(text.strip())
+            if not raw.isdigit() or not (1 <= int(raw) <= 3650):
+                bot.send_message(m.chat.id, t(lang, "bad_days"))
+                WAIT[m.chat.id] = state
+                return
+            tg = int(state["extra"]["tg"])
+            ends = grant_days(tg, int(raw))
+            push_access_change(tg, "sub_granted", date=fmt_date(lang_of_tg(tg), ends.isoformat(), with_time=False))
+            bot.send_message(m.chat.id, t(lang, "saved"))
+            show_admin_card(m.chat.id, lang, tg)
         elif kind in ("review", "report"):
             body = text.strip()
             if not (3 <= len(body) <= 500):
@@ -1894,7 +2053,7 @@ def on_text(m):
             bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "create_shop":
             shop, trial = create_shop(user, text.strip())
-            extra = "\n" + (t(lang, "trial") if trial else t(lang, "trial_used"))
+            extra = "" if TRIAL_DAYS <= 0 else "\n" + (t(lang, "trial") if trial else t(lang, "trial_used"))
             bot.send_message(m.chat.id, f"{shop['title']}\n{bot_link(shop['id'])}{extra}")
         elif kind == "add_product":
             bot.send_message(m.chat.id, t(lang, "add_product_btn"))
@@ -2092,6 +2251,11 @@ def menu_commands(m):
         return
     if gate_onboarding(m, user):
         return
+    if m.text.startswith("/menu"):
+        try:
+            set_setting(kb_key(m.from_user.id), "")     # reopen the keyboard
+        except Exception as e:
+            print("kb flag:", e)
     if m.text.startswith("/shops"):
         customer_action(Click(m), user, lang_of(user), "shops")
         return
@@ -2183,6 +2347,9 @@ def handle_menu(m):
 @bot.message_handler(func=lambda m: m.content_type == "text" and not (m.text or "").startswith("/"))
 def menu_text(m):
     try:
+        if (m.text or "").strip() in labels("close_menu"):
+            close_reply_keyboard(m)
+            return
         user = get_user(m.from_user)
         if m.chat.id in WAIT:
             if is_exact_menu_text(m.text or ""):
