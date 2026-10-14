@@ -693,7 +693,7 @@ def finalize_paid_order(o, source="stars"):
             sk.add(types.InlineKeyboardButton(t(sl, "btn_refund"), callback_data=f"cn:{o['id']}"))
         sk.add(types.InlineKeyboardButton(t(sl, "btn_order_details"), callback_data=f"od:{o['id']}"))
         notify(tg, seller_order_message(sl, fresh, items, "paid" if shipping else "sale"), sk)
-    return True, None
+    return True, ("delivery" if failed_delivery else None)
 
 def refund_charge(tg_id, charge_id):
     try:
@@ -722,24 +722,74 @@ def handle_order_payment(m, order_id):
         refund_charge(m.from_user.id, charge)
         bot.send_message(m.chat.id, t(lang, "amount_mismatch"))
         return
+
     ledger = record_charge(charge, "order", order_id, o.get("user_id"), m.from_user.id, sp.total_amount, sp.currency)
-    if ledger is False:
-        return  # the charge id has already been processed
     if ledger is None:
         for tg in owner_ids():
             notify(tg, f"⚠️ Payment received but ledger DB failed; fulfillment blocked. order={esc(order_id)} charge={esc(charge)}")
         bot.send_message(m.chat.id, t(lang, "db_error"))
         return
-    claimed = claim_payment(order_id, charge)   # atomic: only the first delivery wins
-    if not claimed:
+
+    # A charge can be in the ledger even if the process crashed before claiming the order.
+    # On duplicate delivery, validate the ledger row before allowing recovery; never let one
+    # Telegram charge be replayed against a different order/customer/amount.
+    recovering_paid_order = False
+    if ledger is False:
+        prior = payment_ledger_by_charge(charge)
+        expected = {
+            "kind": "order", "ref": str(order_id), "user_id": o.get("user_id"),
+            "telegram_id": int(m.from_user.id), "amount": int(sp.total_amount), "currency": sp.currency,
+        }
+        if not prior or any(prior.get(k) != v for k, v in expected.items()):
+            for tg in owner_ids():
+                notify(tg, f"🚨 Charge replay mismatch; no fulfillment performed. order={esc(order_id)} charge={esc(charge)}")
+            return
         latest = order_by_id(order_id) or {}
         if latest.get("payment_status") == "paid":
-            return                               # duplicated webhook: already fulfilled
-        refund_charge(m.from_user.id, charge)
-        bot.send_message(m.chat.id, t(lang, "late_payment_refund"))
+            state = latest.get("fulfillment_status") or "not_started"
+            if state in ("pending", "failed"):
+                o = latest
+                recovering_paid_order = True
+            else:
+                # completed, already processing, or legacy order with unknown fulfillment state
+                if state == "processing":
+                    for tg in owner_ids():
+                        notify(tg, f"⚠️ Payment fulfillment is still marked processing; check manually. order={esc(order_id)} charge={esc(charge)}")
+                return
+        elif latest.get("payment_status") == "unpaid" and latest.get("status") == "pending":
+            pass  # resume below: ledger insert succeeded but the order claim did not
+        else:
+            return
+
+    claimed = o if recovering_paid_order else claim_payment(order_id, charge)
+    if not claimed:
+        latest = order_by_id(order_id) or {}
+        if latest.get("payment_status") == "paid" and latest.get("fulfillment_status") in ("pending", "failed"):
+            claimed = latest
+            recovering_paid_order = True
+        else:
+            # A paid order is not refunded just because a duplicate update arrived.
+            if latest.get("payment_status") != "paid":
+                refund_charge(m.from_user.id, charge)
+                bot.send_message(m.chat.id, t(lang, "late_payment_refund"))
+            return
+
+    # Only one webhook worker can transition pending/failed -> processing. A process crash
+    # while processing is flagged for manual recovery rather than risking duplicate delivery.
+    fulfillment_claim = claim_fulfillment(order_id)
+    if not fulfillment_claim:
         return
-    ok, why = finalize_paid_order(claimed, "stars")
+    try:
+        ok, why = finalize_paid_order(fulfillment_claim, "stars")
+    except Exception as e:
+        set_fulfillment_status(order_id, "failed", repr(e))
+        for tg in owner_ids():
+            notify(tg, f"⚠️ Payment recorded but fulfillment crashed; resend webhook or retry recovery. order={esc(order_id)} charge={esc(charge)} error={esc(str(e)[:300])}")
+        print("paid order fulfillment crashed:", order_id, repr(e))
+        return
+
     if not ok and why == "no_customer":
+        set_fulfillment_status(order_id, "failed", "customer record missing")
         refunded = refund_charge(m.from_user.id, charge)
         update_order(order_id, status="cancelled" if refunded else "paid",
                      payment_status="refunded" if refunded else "paid",
@@ -748,12 +798,19 @@ def handle_order_payment(m, order_id):
             notify(tg, f"⚠️ Paid order has missing customer; refund {'succeeded' if refunded else 'FAILED, manual action required'}. order={esc(order_id)} charge={esc(charge)}")
         return
     if not ok and why == "stock":
+        set_fulfillment_status(order_id, "failed", "stock unavailable")
         refunded = refund_charge(m.from_user.id, charge)
         update_order(order_id, status="cancelled", payment_status="refunded" if refunded else "paid", cancelled_at=iso_now())
         bot.send_message(m.chat.id, t(lang, "stock_race_refund"))
         if not refunded:
             for tg in owner_ids():
                 notify(tg, f"⚠️ Manual refund needed: order {esc(order_id)} charge={esc(charge)}")
+        return
+
+    if why == "delivery":
+        set_fulfillment_status(order_id, "failed", "digital delivery failed; retry/manual review required")
+    else:
+        set_fulfillment_status(order_id, "completed")
 
 def precheck_order(order_id, q):
     lang = lang_of_tg(q.from_user.id)
