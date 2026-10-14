@@ -53,7 +53,9 @@ def set_panel(tg_id, panel):
     if panel == "admin":
         set_user_role(tg_id, "admin")
     elif panel == "customer":
-        set_user_role(tg_id, "user")
+        row = one("users", {"telegram_id": int(tg_id)})
+        if not (row and row.get("role") == "owner"):   # never demote an owner
+            set_user_role(tg_id, "user")
 
 def is_seller(user):
     if not user:
