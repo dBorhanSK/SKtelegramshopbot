@@ -9,7 +9,14 @@ import traceback
 from collections import deque
 
 app = Flask(__name__)
-app.secret_key = WEBHOOK_SECRET or "dev-secret"
+# Use a dedicated secret for Flask sessions when available. Never fall back to a public default.
+SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
+app.secret_key = SESSION_SECRET or (WEBHOOK_SECRET if WEBHOOK_SECRET and WEBHOOK_SECRET != "change_me" else (ADMIN_PASSWORD or None))
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=True,
+)
 
 SEEN_UPDATES = deque(maxlen=2000)   # Telegram retries on slow replies: never process an update twice
 
@@ -37,7 +44,7 @@ def telegram_webhook():
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     # The secret header is REQUIRED (the old check let requests without the header through,
     # which would allow forged "successful_payment" updates).
-    if not WEBHOOK_SECRET or not hmac.compare_digest(secret or "", WEBHOOK_SECRET):
+    if not WEBHOOK_SECRET or WEBHOOK_SECRET == "change_me" or not hmac.compare_digest(secret or "", WEBHOOK_SECRET):
         print("webhook forbidden: secret mismatch")
         return "forbidden", 403
     update = request.get_json(force=True, silent=True)
@@ -66,10 +73,13 @@ def admin():
 @app.route("/admin/login", methods=["GET","POST"])
 def login():
     if request.method=="POST":
-        if request.form.get("password")==ADMIN_PASSWORD:
-            session["admin"]=True
+        # Fail closed if Render's ADMIN_PASSWORD was removed/misspelled; blank must never log in.
+        submitted = request.form.get("password", "")
+        if ADMIN_PASSWORD and ADMIN_PASSWORD.strip() and hmac.compare_digest(submitted, ADMIN_PASSWORD):
+            session.clear()  # rotate the session contents after authentication
+            session["admin"] = True
             return redirect(url_for("admin"))
-        return render_template("login.html", error="Wrong password")
+        return render_template("login.html", error="Admin login is not configured or the password is incorrect")
     return render_template("login.html", error=None)
 
 @app.post("/admin/logout")
@@ -111,7 +121,8 @@ def admin_orders():
 
 @app.post("/set-webhook")
 def set_webhook():
-    if request.args.get("secret") != WEBHOOK_SECRET:
+    supplied = request.args.get("secret", "")
+    if not WEBHOOK_SECRET or WEBHOOK_SECRET == "change_me" or not hmac.compare_digest(supplied, WEBHOOK_SECRET):
         return "forbidden",403
     if not BASE_URL:
         return "BASE_URL missing",400
