@@ -688,14 +688,57 @@ def order_stars_amount(order):
 def claim_payment(order_id, transaction_id=None):
     """Atomically flips pending/unpaid -> paid. Returns the order row only for the
     FIRST caller, so a duplicated webhook can never fulfil an order twice."""
-    data = {"payment_status": "paid", "status": "paid", "paid_at": iso_now()}
+    data = {"payment_status": "paid", "status": "paid", "paid_at": iso_now(), "fulfillment_status": "pending", "fulfillment_error": None}
     if transaction_id:
         data["transaction_id"] = transaction_id
     res = table("orders").update(data).eq("id", order_id).eq("payment_status", "unpaid").eq("status", "pending").execute()
     return res.data[0] if res.data else None
 
 def release_claim(order_id):
-    return table("orders").update({"payment_status": "unpaid", "status": "pending", "paid_at": None, "transaction_id": None}).eq("id", order_id).execute()
+    return table("orders").update({"payment_status": "unpaid", "status": "pending", "paid_at": None, "transaction_id": None, "fulfillment_status": "not_started", "fulfillment_error": None}).eq("id", order_id).execute()
+
+
+def payment_ledger_by_charge(charge_id):
+    """Return the existing ledger row for a Telegram charge, if any."""
+    rows = table("payments_ledger").select("*").eq("charge_id", charge_id).limit(1).execute().data
+    return rows[0] if rows else None
+
+
+def claim_fulfillment(order_id):
+    """Atomically claim pending/failed work, or reclaim a processing lease older than 10 min."""
+    now = iso_now()
+    fields = {"fulfillment_status": "processing", "fulfillment_error": None, "fulfillment_started_at": now}
+    for state in ("pending", "failed"):
+        res = (table("orders").update(fields).eq("id", order_id)
+               .eq("payment_status", "paid").eq("fulfillment_status", state).execute())
+        if res.data:
+            return res.data[0]
+
+    # A hard Render/process kill can leave the row in processing. Use the old timestamp as a
+    # compare-and-swap token so only one duplicate webhook can reclaim the expired lease.
+    row = order_by_id(order_id) or {}
+    started = row.get("fulfillment_started_at")
+    if row.get("payment_status") == "paid" and row.get("fulfillment_status") == "processing" and started:
+        try:
+            started_dt = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            if started_dt.tzinfo is None:
+                started_dt = started_dt.replace(tzinfo=timezone.utc)
+            if (_now() - started_dt).total_seconds() >= 600:
+                res = (table("orders").update(fields).eq("id", order_id)
+                       .eq("payment_status", "paid").eq("fulfillment_status", "processing")
+                       .eq("fulfillment_started_at", started).execute())
+                if res.data:
+                    return res.data[0]
+        except Exception as e:
+            print("could not evaluate fulfillment lease:", e)
+    return None
+
+
+def set_fulfillment_status(order_id, status, error=None):
+    fields = {"fulfillment_status": status, "fulfillment_error": (str(error)[:1000] if error else None)}
+    if status != "processing":
+        fields["fulfillment_started_at"] = None
+    return table("orders").update(fields).eq("id", order_id).execute()
 
 def update_order(order_id, **fields):
     res = table("orders").update(fields).eq("id", order_id).execute()
@@ -703,6 +746,9 @@ def update_order(order_id, **fields):
 
 def deduct_order_stock(order, items):
     """Deduct stock of every physical line (all-or-nothing)."""
+    fresh_order = order_by_id(order.get("id")) or order
+    if fresh_order.get("stock_deducted"):
+        return True
     done = []
     for it in items:
         if it.get("product_type") != "physical":
