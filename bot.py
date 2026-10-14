@@ -740,7 +740,10 @@ def precheck_order(order_id, q):
     o = order_by_id(order_id)
     if not o or o.get("status") != "pending" or o.get("payment_status") != "unpaid":
         return False, t(lang, "order_inactive")
-    if int(q.total_amount) != order_stars_amount(o):
+    customer = user_by_id(o.get("user_id"))
+    if not customer or int(customer.get("telegram_id") or 0) != int(q.from_user.id):
+        return False, t(lang, "order_inactive")
+    if (q.currency or "") != "XTR" or int(q.total_amount) != order_stars_amount(o):
         return False, t(lang, "order_inactive")
     for it in order_items(order_id):
         if it.get("product_type") == "physical":
@@ -1407,10 +1410,18 @@ def callback(c):
             bot.send_message(c.message.chat.id, t(lang, "not_allowed"))
     elif data.startswith("sc:"):
         shop_id = data.split(":", 1)[1]
+        shop = shop_by_id(shop_id)
+        if not shop or not (is_owner(c.from_user.id) or shop.get("owner_user_id") == user.get("id")):
+            bot.send_message(c.message.chat.id, t(lang, "not_allowed"))
+            return
         bot.send_message(c.message.chat.id, t(lang, "send_channel"))
         expect(c.message.chat.id, "shop_channel", {"shop_id": shop_id})
     elif data.startswith("cc:"):
         shop_id = data.split(":", 1)[1]
+        shop = shop_by_id(shop_id)
+        if not shop or not (is_owner(c.from_user.id) or shop.get("owner_user_id") == user.get("id")):
+            bot.send_message(c.message.chat.id, t(lang, "not_allowed"))
+            return
         clear_shop_channel(shop_id)
         bot.send_message(c.message.chat.id, t(lang, "channel_cleared"))
     elif data == "sub:cancel":
@@ -2136,8 +2147,14 @@ def on_text(m):
         elif kind == "ship_track":
             mark_shipped(m, user, lang, state["extra"]["order_id"], text)
         elif kind == "shop_channel":
+            # Re-check ownership when the text arrives; the waiting state is not an authorization token.
+            shop_id = (state.get("extra") or {}).get("shop_id")
+            shop = shop_by_id(shop_id) if shop_id else None
+            if not shop or not (is_owner(m.from_user.id) or shop.get("owner_user_id") == user.get("id")):
+                bot.send_message(m.chat.id, t(lang, "not_allowed"))
+                return
             channel_id, username = parse_channel(text)
-            set_shop_channel(state["extra"]["shop_id"], channel_id, username)
+            set_shop_channel(shop_id, channel_id, username)
             bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "seller_support":
             # belongs ONLY to this seller's shop
@@ -2189,18 +2206,44 @@ def submit_receipt(m, order_id):
 
 @bot.pre_checkout_query_handler(func=lambda q: True)
 def precheckout(q):
-    ok, err = True, None
+    # Fail closed: a database or validation error must never authorize a payment.
+    ok, err = False, "Payment could not be verified. Please try again."
     try:
         payload = q.invoice_payload or ""
         if payload.startswith("order:"):
             ok, err = precheck_order(payload.split(":", 1)[1], q)
-    except Exception as e:
-        print("precheckout check failed:", e)      # never block a payment because of OUR error
-    try:
-        if ok:
-            bot.answer_pre_checkout_query(q.id, ok=True)
+        elif payload.startswith("plan:"):
+            parts = payload.split(":")
+            if len(parts) == 4:
+                _, plan_id, user_id, shop_id = parts
+                customer = user_by_tg(q.from_user.id)
+                plan = plan_by_id(plan_id)
+                shop = shop_by_id(shop_id) if shop_id != "none" else None
+                if (customer and str(customer.get("id")) == user_id and plan and plan.get("active", True)
+                        and q.currency == "XTR" and int(q.total_amount) == max(1, int(plan.get("stars") or 0))
+                        and (shop_id == "none" or (shop and (is_owner(q.from_user.id) or shop.get("owner_user_id") == customer.get("id"))))):
+                    ok, err = True, None
+                else:
+                    err = "This subscription invoice is invalid or has expired."
+        elif payload.startswith("prod:"):
+            parts = payload.split(":")
+            if len(parts) == 3:
+                _, product_id, user_id = parts
+                customer = user_by_tg(q.from_user.id)
+                p = product(product_id)
+                expected = int((p or {}).get("stars_price") or 0)
+                if (customer and str(customer.get("id")) == user_id and p and p.get("active", True)
+                        and q.currency == "XTR" and expected > 0 and int(q.total_amount) == expected):
+                    ok, err = True, None
+                else:
+                    err = "This product invoice is invalid or has expired."
         else:
-            bot.answer_pre_checkout_query(q.id, ok=False, error_message=err or "Unavailable")
+            err = "Unknown or invalid invoice."
+    except Exception as e:
+        print("precheckout validation failed; payment rejected:", e)
+        ok, err = False, "Payment could not be verified. Please try again."
+    try:
+        bot.answer_pre_checkout_query(q.id, ok=bool(ok), error_message=None if ok else (err or "Unavailable"))
     except Exception as e:
         print("precheckout answer failed:", e)
 
@@ -2212,25 +2255,41 @@ def successful_payment(m):
         handle_order_payment(m, payload.split(":", 1)[1])
         return
     if payload.startswith("prod:"):
-        if not record_charge(sp.telegram_payment_charge_id, "prod", payload, None, m.from_user.id, sp.total_amount, sp.currency):
+        parts = payload.split(":")
+        customer = user_by_tg(m.from_user.id)
+        if len(parts) != 3 or not customer or str(customer.get("id")) != parts[2] or sp.currency != "XTR":
+            refund_charge(m.from_user.id, sp.telegram_payment_charge_id)
             return
-        _, pid, user_id = payload.split(":", 2)
-        p = product(pid)
-        if p:
-            deliver_product(m.chat.id, p)
-            bot.send_message(m.chat.id, "✅ " + t(lang_of(get_user(m.from_user)), "delivered"))
+        p = product(parts[1])
+        if not p or not p.get("active", True) or int(sp.total_amount) != int(p.get("stars_price") or 0):
+            refund_charge(m.from_user.id, sp.telegram_payment_charge_id)
+            return
+        if not record_charge(sp.telegram_payment_charge_id, "prod", payload, customer.get("id"), m.from_user.id, sp.total_amount, sp.currency):
+            return
+        deliver_product(m.chat.id, p)
+        bot.send_message(m.chat.id, "✅ " + t(lang_of(customer), "delivered"))
         return
     if payload.startswith("plan:"):
         parts = payload.split(":")
-        plan_id, user_id = parts[1], parts[2]
+        if len(parts) != 4:
+            refund_charge(m.from_user.id, sp.telegram_payment_charge_id)
+            return
+        _, plan_id, user_id, raw_shop_id = parts
+        customer = user_by_tg(m.from_user.id)
+        plan = plan_by_id(plan_id)
+        shop = shop_by_id(raw_shop_id) if raw_shop_id != "none" else None
+        valid = (customer and str(customer.get("id")) == user_id and plan and plan.get("active", True)
+                 and sp.currency == "XTR" and int(sp.total_amount) == max(1, int(plan.get("stars") or 0))
+                 and (raw_shop_id == "none" or (shop and (is_owner(m.from_user.id) or shop.get("owner_user_id") == customer.get("id")))))
+        if not valid:
+            refund_charge(m.from_user.id, sp.telegram_payment_charge_id)
+            return
         if not record_charge(sp.telegram_payment_charge_id, "plan", plan_id, user_id, m.from_user.id, sp.total_amount, sp.currency):
             return
-        shop_id = parts[3] if len(parts) > 3 and parts[3] != "none" else None
-        plan = plan_by_id(plan_id)
-        if plan:
-            ends = activate_plan(user_id, shop_id, plan)
-            lg = lang_of(get_user(m.from_user))
-            bot.send_message(m.chat.id, f"✅ {t(lg, 'sub_until')} {fmt_date(lg, ends.isoformat(), with_time=False)}")
+        shop_id = raw_shop_id if raw_shop_id != "none" else None
+        ends = activate_plan(user_id, shop_id, plan)
+        lg = lang_of(customer)
+        bot.send_message(m.chat.id, f"✅ {t(lg, 'sub_until')} {fmt_date(lg, ends.isoformat(), with_time=False)}")
         return
 
 @bot.message_handler(content_types=["photo", "document", "video", "animation"])
