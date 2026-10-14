@@ -668,6 +668,8 @@ def finalize_paid_order(o, source="stars"):
     items = order_items(o["id"])
     customer = user_by_id(o["user_id"])
     if not customer:
+        for tg in owner_ids():
+            notify(tg, f"⚠️ Paid order has no customer record; recovery/refund required. order={esc(o['id'])}")
         return False, "no_customer"
     clang, ctg, short = lang_of(customer), customer["telegram_id"], short_id(o["id"])
     shipping = bool(o.get("requires_shipping"))
@@ -676,9 +678,12 @@ def finalize_paid_order(o, source="stars"):
     k = types.InlineKeyboardMarkup()
     k.add(types.InlineKeyboardButton(t(clang, "btn_order_details"), callback_data=f"od:{o['id']}"))
     notify(ctg, tf(clang, "order_paid_ship" if shipping else "order_paid_digital", id=short), k)
-    if deliver_order_digital(ctg, clang, items):
+    failed_delivery = deliver_order_digital(ctg, clang, items)
+    if failed_delivery:
         notify(ctg, t(clang, "digital_failed"))
-    if not shipping:
+        for tg in owner_ids():
+            notify(tg, f"⚠️ Digital delivery failed; order remains paid for retry/manual recovery. order={esc(o['id'])}")
+    if not shipping and not failed_delivery:
         update_order(o["id"], status="completed", completed_at=iso_now())
     fresh = order_by_id(o["id"]) or o
     for tg, sl in seller_targets(fresh):
@@ -713,10 +718,17 @@ def handle_order_payment(m, order_id):
         for tg in owner_ids():
             notify(tg, f"⚠️ Payment for unknown order {esc(order_id)} was refunded. charge={esc(charge)}")
         return
-    record_charge(charge, "order", order_id, o.get("user_id"), m.from_user.id, sp.total_amount, sp.currency)  # audit trail
     if sp.currency != "XTR" or int(sp.total_amount) != order_stars_amount(o):
         refund_charge(m.from_user.id, charge)
         bot.send_message(m.chat.id, t(lang, "amount_mismatch"))
+        return
+    ledger = record_charge(charge, "order", order_id, o.get("user_id"), m.from_user.id, sp.total_amount, sp.currency)
+    if ledger is False:
+        return  # the charge id has already been processed
+    if ledger is None:
+        for tg in owner_ids():
+            notify(tg, f"⚠️ Payment received but ledger DB failed; fulfillment blocked. order={esc(order_id)} charge={esc(charge)}")
+        bot.send_message(m.chat.id, t(lang, "db_error"))
         return
     claimed = claim_payment(order_id, charge)   # atomic: only the first delivery wins
     if not claimed:
@@ -727,6 +739,14 @@ def handle_order_payment(m, order_id):
         bot.send_message(m.chat.id, t(lang, "late_payment_refund"))
         return
     ok, why = finalize_paid_order(claimed, "stars")
+    if not ok and why == "no_customer":
+        refunded = refund_charge(m.from_user.id, charge)
+        update_order(order_id, status="cancelled" if refunded else "paid",
+                     payment_status="refunded" if refunded else "paid",
+                     cancelled_at=iso_now() if refunded else None)
+        for tg in owner_ids():
+            notify(tg, f"⚠️ Paid order has missing customer; refund {'succeeded' if refunded else 'FAILED, manual action required'}. order={esc(order_id)} charge={esc(charge)}")
+        return
     if not ok and why == "stock":
         refunded = refund_charge(m.from_user.id, charge)
         update_order(order_id, status="cancelled", payment_status="refunded" if refunded else "paid", cancelled_at=iso_now())
@@ -2264,10 +2284,19 @@ def successful_payment(m):
         if not p or not p.get("active", True) or int(sp.total_amount) != int(p.get("stars_price") or 0):
             refund_charge(m.from_user.id, sp.telegram_payment_charge_id)
             return
-        if not record_charge(sp.telegram_payment_charge_id, "prod", payload, customer.get("id"), m.from_user.id, sp.total_amount, sp.currency):
+        ledger = record_charge(sp.telegram_payment_charge_id, "prod", payload, customer.get("id"), m.from_user.id, sp.total_amount, sp.currency)
+        if ledger is not True:
+            if ledger is None:
+                for tg in owner_ids():
+                    notify(tg, f"⚠️ Product payment needs recovery: DB ledger unavailable; charge={esc(sp.telegram_payment_charge_id)}")
             return
-        deliver_product(m.chat.id, p)
-        bot.send_message(m.chat.id, "✅ " + t(lang_of(customer), "delivered"))
+        try:
+            deliver_product(m.chat.id, p)
+            bot.send_message(m.chat.id, "✅ " + t(lang_of(customer), "delivered"))
+        except Exception as e:
+            print("product delivery failed after payment:", e)
+            for tg in owner_ids():
+                notify(tg, f"⚠️ Product delivery failed; manual recovery required. charge={esc(sp.telegram_payment_charge_id)}")
         return
     if payload.startswith("plan:"):
         parts = payload.split(":")
@@ -2284,7 +2313,11 @@ def successful_payment(m):
         if not valid:
             refund_charge(m.from_user.id, sp.telegram_payment_charge_id)
             return
-        if not record_charge(sp.telegram_payment_charge_id, "plan", plan_id, user_id, m.from_user.id, sp.total_amount, sp.currency):
+        ledger = record_charge(sp.telegram_payment_charge_id, "plan", plan_id, user_id, m.from_user.id, sp.total_amount, sp.currency)
+        if ledger is not True:
+            if ledger is None:
+                for tg in owner_ids():
+                    notify(tg, f"⚠️ Plan payment needs recovery: DB ledger unavailable; charge={esc(sp.telegram_payment_charge_id)}")
             return
         shop_id = raw_shop_id if raw_shop_id != "none" else None
         ends = activate_plan(user_id, shop_id, plan)
