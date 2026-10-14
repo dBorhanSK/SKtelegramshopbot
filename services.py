@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from db import table, one
-from config import ADMIN_IDS, REVIEW_LIMIT, REPORT_LIMIT, REVIEW_REQUIRES_PURCHASE, MAX_CART_QTY
+from config import ADMIN_IDS, REVIEW_LIMIT, REPORT_LIMIT, REVIEW_REQUIRES_PURCHASE, MAX_CART_QTY, TRIAL_DAYS
 from payments import stars_amount
 
 OWNER_ID = 6914909647
@@ -11,6 +11,18 @@ def _now():
 def get_user(tg_user):
     row = one("users", {"telegram_id": tg_user.id})
     if row:
+        # keep name/username fresh (also fills users created by the owner via numeric id)
+        upd = {}
+        if tg_user.username != row.get("username"):
+            upd["username"] = tg_user.username
+        if tg_user.first_name and tg_user.first_name != row.get("first_name"):
+            upd["first_name"] = tg_user.first_name
+        if upd:
+            try:
+                table("users").update(upd).eq("id", row["id"]).execute()
+                row.update(upd)
+            except Exception as e:
+                print("profile refresh:", e)
         return row
     payload = {
         "telegram_id": tg_user.id,
@@ -37,11 +49,30 @@ def is_owner(tg_id):
     row = one("users", {"telegram_id": tg_id})
     return bool(row and row.get("role") == "owner")
 
-def is_admin(tg_id):
+def is_exempt(tg_id):
+    """Admin appointed by the owner with a numeric id: needs no subscription."""
+    try:
+        return get_setting(f"exempt_sub:{int(tg_id)}") == "yes"
+    except Exception:
+        return False
+
+def has_admin_role(user):
+    """The person is registered as an admin (may be locked out because the subscription ended)."""
+    return bool(user and user.get("role") in ("admin", "manager"))
+
+def has_admin_access(tg_id):
+    """REAL admin access: owner, or admin with an active subscription, or admin appointed
+    by the owner without subscription. Computed live, so access ends the moment the
+    subscription ends and returns the moment a new one is bought/granted."""
     if is_owner(tg_id):
         return True
-    row = one("users", {"telegram_id": tg_id})
-    return bool(row and row.get("role") in ("owner", "admin", "manager"))
+    row = one("users", {"telegram_id": int(tg_id)})
+    if not has_admin_role(row):
+        return False
+    return is_exempt(tg_id) or bool(active_subscription(row["id"]))
+
+def is_admin(tg_id):
+    return has_admin_access(tg_id)
 
 def panel_of(tg_id):
     if int(tg_id) == OWNER_ID or int(tg_id) in ADMIN_IDS:
@@ -58,11 +89,10 @@ def set_panel(tg_id, panel):
             set_user_role(tg_id, "user")
 
 def is_seller(user):
-    if not user:
+    """Admin WITH access (subscription active or exempt). See has_admin_role for the role only."""
+    if not has_admin_role(user):
         return False
-    if user.get("role") in ("admin", "manager"):
-        return True
-    return panel_of(user.get("telegram_id")) == "admin"
+    return is_exempt(user.get("telegram_id")) or bool(active_subscription(user["id"]))
 
 def accept_admin(user):
     set_user_role(user["telegram_id"], "admin")
@@ -329,12 +359,16 @@ def active_subscription(user_id):
 def shop_has_active_sub(shop):
     if not shop:
         return False
+    owner = user_by_id(shop["owner_user_id"])
+    if owner and (owner.get("role") == "owner" or is_owner(owner["telegram_id"]) or
+                  (has_admin_role(owner) and is_exempt(owner["telegram_id"]))):
+        return True
     return bool(active_subscription(shop["owner_user_id"]))
 
 def start_trial(user, shop_id):
-    if user.get("trial_used"):
+    if TRIAL_DAYS <= 0 or user.get("trial_used"):
         return False
-    ends = _now() + timedelta(days=3)
+    ends = _now() + timedelta(days=TRIAL_DAYS)
     table("subscriptions").insert({
         "user_id": user["id"],
         "shop_id": shop_id,
@@ -854,3 +888,84 @@ def submit_report(product_id, user, reason):
             return False, "report_limit"
         raise
     return True, None
+
+
+# =====================================================================
+# Owner tools: admins, subscriptions, appointing by numeric id
+# =====================================================================
+def ensure_user_row(tg_id):
+    """Creates a placeholder user so the owner can appoint someone who never opened the bot."""
+    tg_id = int(tg_id)
+    row = one("users", {"telegram_id": tg_id})
+    if row:
+        return row
+    res = table("users").insert({
+        "telegram_id": tg_id, "language": "fa", "language_set": False,
+        "wallet_balance": 0, "points": 0, "role": "user", "trial_used": False,
+    }).execute()
+    return res.data[0] if res.data else None
+
+def appoint_admin(tg_id):
+    """Owner appoints an admin by numeric id: full access WITHOUT buying a subscription."""
+    row = ensure_user_row(tg_id)
+    if not row:
+        return None
+    if row.get("role") != "owner":
+        set_panel(tg_id, "admin")
+        set_setting(f"exempt_sub:{int(tg_id)}", "yes")
+    return one("users", {"telegram_id": int(tg_id)})
+
+def set_exempt(tg_id, on):
+    set_setting(f"exempt_sub:{int(tg_id)}", "yes" if on else "")
+
+def revoke_admin(tg_id):
+    """Removes admin access completely (role, exemption and any active subscription)."""
+    row = one("users", {"telegram_id": int(tg_id)})
+    if not row or row.get("role") == "owner" or int(tg_id) in owner_ids():
+        return False
+    set_exempt(tg_id, False)
+    cancel_subscription(row["id"])
+    set_panel(tg_id, "customer")        # also sets role = user
+    return True
+
+def grant_days(tg_id, days):
+    """Owner adds subscription days (stacked after the current end date). Returns the end date."""
+    days = int(days)
+    row = ensure_user_row(tg_id)
+    if row.get("role") not in ("owner", "admin", "manager"):
+        set_panel(tg_id, "admin")
+    shop = my_shop(row["id"])
+    return activate_plan(row["id"], shop["id"] if shop else None, {"id": None, "days": days})
+
+def cancel_admin_subscription(tg_id):
+    row = one("users", {"telegram_id": int(tg_id)})
+    if row:
+        cancel_subscription(row["id"])
+
+def admin_info(tg_id):
+    row = one("users", {"telegram_id": int(tg_id)})
+    if not row:
+        return None
+    sub = active_subscription(row["id"])
+    exempt = is_exempt(tg_id)
+    return {
+        "telegram_id": row["telegram_id"], "user_id": row["id"],
+        "username": row.get("username"), "first_name": row.get("first_name"),
+        "role": row.get("role"), "exempt": exempt,
+        "status": "exempt" if exempt else ("active" if sub else "expired"),
+        "ends_at": sub["ends_at"] if sub else None,
+    }
+
+def admin_directory():
+    out = []
+    owners = set(owner_ids())
+    for row in list_admins():
+        tg = row.get("telegram_id")
+        if row.get("role") == "owner" or tg in owners:
+            continue
+        info = admin_info(tg)
+        if info:
+            out.append(info)
+    order = {"active": 0, "exempt": 1, "expired": 2}
+    out.sort(key=lambda x: (order.get(x["status"], 3), x["telegram_id"]))
+    return out
