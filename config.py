@@ -46,3 +46,7 @@ REVIEW_REQUIRES_PURCHASE = os.getenv("REVIEW_REQUIRES_PURCHASE", "1").strip().lo
 MAX_CART_QTY = _int_env("MAX_CART_QTY", 10, 1, 100)
 # Unfinished forms (address, product wizard...) are forgotten after this many minutes.
 STATE_TTL_MIN = _int_env("STATE_TTL_MIN", 30, 1, 1440)
+
+# Free trial given to a NEW admin the first time. 0 = no trial: admins must buy a plan
+# (or be appointed by the owner with their numeric id) before they get admin access.
+TRIAL_DAYS = _int_env("TRIAL_DAYS", 3, 0, 365)
