@@ -190,9 +190,15 @@ def mark_paid(order_id, transaction_id=None):
     return table("orders").update(data).eq("id", order_id).execute()
 
 def stats():
-    orders = table("orders").select("total,payment_status,created_at").eq("payment_status", "paid").execute().data
-    revenue = sum(float(x["total"]) for x in orders)
-    return {"orders": len(orders), "revenue": revenue}
+    orders = table("orders").select("total,payment_status,created_at,currency,payment_method").eq("payment_status", "paid").execute().data
+    by_currency = {}
+    for order in orders:
+        currency = order.get("currency") or "IRT"
+        if currency == "CUSTOM" or order.get("payment_method") == "custom":
+            continue
+        by_currency[currency] = by_currency.get(currency, 0.0) + float(order.get("total") or 0)
+    return {"orders": len(orders), "revenue": sum(by_currency.values()),
+            "revenue_by_currency": by_currency}
 
 def apply_coupon(code, subtotal):
     c = one("coupons", {"code": code.upper()})
@@ -813,10 +819,9 @@ def open_deal_for_user(user_id, within_hours=48):
 
 # ---------------------------------------------------- payments idempotency
 def record_charge(charge_id, kind, ref, user_id, tg_id, amount, currency="XTR"):
-    """True the first time a Telegram charge id is seen, False for a duplicate
-    webhook delivery. Infrastructure errors never block a real payment."""
+    """True=new charge, False=duplicate, None=ledger unavailable (fail closed)."""
     if not charge_id:
-        return True
+        return None
     try:
         table("payments_ledger").insert({
             "charge_id": charge_id, "kind": kind, "ref": str(ref), "user_id": user_id,
@@ -826,10 +831,9 @@ def record_charge(charge_id, kind, ref, user_id, tg_id, amount, currency="XTR"):
     except Exception as e:
         if is_duplicate_error(e):
             return False
-        print("ledger unavailable:", e)
-        return True
+        print("ledger unavailable; payment fulfillment blocked:", e)
+        return None
 
-# ------------------------------------------------------ reviews & reports
 def _count(tbl, product_id, user_id):
     return len(table(tbl).select("id").eq("product_id", product_id).eq("user_id", user_id).execute().data)
 
