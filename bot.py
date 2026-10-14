@@ -127,27 +127,48 @@ def chat_menu(lang, role):
         k.row(t(lang, "language"), t(lang, "switch_panel"))
     return k
 
+def role_commands(lang, role):
+    fa = lang == "fa"
+    cmds = [("panel", "باز کردن پنل" if fa else "Open panel"),
+            ("shops", "فروشگاه‌ها" if fa else "Shops"),
+            ("support", "پشتیبانی" if fa else "Support"),
+            ("switch", "تغییر پنل" if fa else "Switch panel"),
+            ("start", "شروع / زبان" if fa else "Start / language")]
+    return [types.BotCommand(c, d) for c, d in cmds]
+
+def refresh_chat_menu(chat_id, lang, role):
+    """Shows the blue 'Menu' button (like the screenshot) with the command list for this chat."""
+    try:
+        scope = types.BotCommandScopeChat(chat_id)
+        bot.set_my_commands(role_commands(lang, role), scope=scope)
+    except Exception as e:
+        print("chat commands:", e)
+    try:
+        bot.set_chat_menu_button(chat_id=chat_id, menu_button=types.MenuButtonCommands())
+    except Exception as e:
+        print("chat menu button:", e)
+
 def setup_commands():
     try:
         bot.set_my_commands([
             types.BotCommand("start", "شروع و انتخاب زبان"),
-            types.BotCommand("menu", "منوی پنل"),
-            types.BotCommand("panel", "تغییر پنل"),
+            types.BotCommand("panel", "باز کردن پنل"),
+            types.BotCommand("switch", "تغییر پنل"),
             types.BotCommand("shops", "فروشگاه‌ها"),
             types.BotCommand("support", "پشتیبانی"),
         ], language_code="fa")
         bot.set_my_commands([
             types.BotCommand("start", "Start and choose language"),
-            types.BotCommand("menu", "Open panel menu"),
-            types.BotCommand("panel", "Switch panel"),
+            types.BotCommand("panel", "Open panel"),
+            types.BotCommand("switch", "Switch panel"),
             types.BotCommand("shops", "Shops"),
             types.BotCommand("support", "Support"),
         ], language_code="en")
         # everyone whose Telegram language is neither fa nor en gets the English list
         bot.set_my_commands([
             types.BotCommand("start", "Start and choose language"),
-            types.BotCommand("menu", "Open panel menu"),
-            types.BotCommand("panel", "Switch panel"),
+            types.BotCommand("panel", "Open panel"),
+            types.BotCommand("switch", "Switch panel"),
             types.BotCommand("shops", "Shops"),
             types.BotCommand("support", "Support"),
         ])
@@ -163,6 +184,26 @@ def ask_panel(chat_id, lang, tg_id):
     k.add(types.InlineKeyboardButton(t(lang, "admin_btn"), callback_data="panel_admin"))
     k.add(types.InlineKeyboardButton(t(lang, "customer_btn"), callback_data="panel_customer"))
     bot.send_message(chat_id, box(t(lang, "choose"), t(lang, "pick_panel")), reply_markup=k)
+
+def seller_support_of(shop):
+    """Support ID that a seller typed for HIS OWN shop only (shops.support_username)."""
+    return ((shop or {}).get("support_username") or "").strip()
+
+def owner_support_id():
+    """Bot owner's support ID: valid for every shop."""
+    return (get_setting("owner_support") or "").strip()
+
+def shop_support_text(lang, shop):
+    """What a customer sees as support contacts inside ONE shop: that shop's seller + the bot owner."""
+    lines = []
+    if shop:
+        sid = seller_support_of(shop)
+        if sid:
+            lines.append(("🏪 فروشنده: " if lang == "fa" else "🏪 Seller: ") + esc(sid))
+    oid = owner_support_id()
+    if oid and oid != (seller_support_of(shop) if shop else ""):
+        lines.append(("👑 پشتیبانی ربات: " if lang == "fa" else "👑 Bot support: ") + esc(oid))
+    return "\n".join(lines)
 
 def lang_of(user):
     return user.get("language") or "fa"
@@ -242,13 +283,22 @@ def send_home(chat_id, user, tg_id):
         box(title, t(lang, "welcome") + sub + "\n\n" + t(lang, "choose")),
         reply_markup=markup,
     )
+    refresh_chat_menu(chat_id, lang, role)
     # No persistent ReplyKeyboard: the inline menu above stays in the chat message.
+
+def norm_channel(channel_id):
+    c = str(channel_id).strip()
+    if c.startswith("https://t.me/"):
+        c = c.split("https://t.me/", 1)[1]
+    if c.lstrip("-").isdigit():
+        return int(c)
+    return c if c.startswith("@") else "@" + c
 
 def member_of(channel_id, user_id):
     if not channel_id:
         return True
     try:
-        m = bot.get_chat_member(channel_id, user_id)
+        m = bot.get_chat_member(norm_channel(channel_id), user_id)
         return m.status in ("member", "administrator", "creator")
     except Exception as e:
         print("channel check failed:", e)
@@ -264,14 +314,14 @@ def gate_channels(user_id, shop=None):
         missing.append(shop.get("required_channel_username") or shop.get("required_channel_id"))
     return missing
 
-def ask_join(chat_id, lang, names):
+def ask_join(chat_id, lang, names, shop_id=None):
     k = types.InlineKeyboardMarkup()
     for name in names:
         clean = str(name).lstrip("@")
         if clean.startswith("-100") or clean.lstrip("-").isdigit():
             continue
         k.add(types.InlineKeyboardButton(clean, url=f"https://t.me/{clean}"))
-    k.add(types.InlineKeyboardButton(t(lang, "joined"), callback_data="check_join"))
+    k.add(types.InlineKeyboardButton(t(lang, "joined"), callback_data=("check_join:" + str(shop_id)) if shop_id else "check_join"))
     bot.send_message(chat_id, t(lang, "join_first"), reply_markup=k)
 
 def bot_link(shop_id):
@@ -978,11 +1028,12 @@ def start(m):
     if not user.get("language_set"):
         ask_language(m.chat.id)
         return
-    continue_onboarding(m.chat.id, user, m.from_user.id)
-    try:
-        bot.send_message(m.chat.id, " ", reply_markup=types.ReplyKeyboardRemove())
+    try:   # remove any old keyboard (a blank text is rejected by Telegram, so use a dot and delete it)
+        tmp = bot.send_message(m.chat.id, ".", reply_markup=types.ReplyKeyboardRemove())
+        bot.delete_message(m.chat.id, tmp.message_id)
     except Exception:
         pass
+    continue_onboarding(m.chat.id, user, m.from_user.id)
 
 def open_pending_or_home(chat_id, user, tg_id):
     shop_id = PENDING_SHOP.pop(chat_id, None)
@@ -1033,8 +1084,18 @@ def callback(c):
     if data == "home":
         send_home(c.message.chat.id, user, c.from_user.id)
         return
-    if data == "check_join":
-        send_home(c.message.chat.id, user, c.from_user.id)
+    if data == "check_join" or data.startswith("check_join:"):
+        shop_id = data.split(":", 1)[1] if ":" in data else (LAST_SHOP.get(c.message.chat.id) or "")
+        shop = shop_by_id(shop_id) if shop_id else None
+        missing = gate_channels(c.from_user.id, shop)
+        if missing:
+            bot.send_message(c.message.chat.id, t(lang, "join_first"))
+            ask_join(c.message.chat.id, lang, missing, shop_id or None)
+            return
+        if shop:
+            show_shop(c.message.chat.id, user, c.from_user.id, shop_id)   # straight into the shop, no panel again
+        else:
+            customer_action(c, user, lang, "shops")
         return
     if data.startswith("own:"):
         if not is_owner(c.from_user.id):
@@ -1225,9 +1286,15 @@ def callback(c):
     elif data == "sub:cancel":
         cancel_subscription(user["id"])
         bot.send_message(c.message.chat.id, t(lang, "saved"))
+    elif data.startswith("sups:"):
+        # customer picked which shop the question is about
+        LAST_SHOP[c.message.chat.id] = data.split(":", 1)[1]
+        customer_action(c, user, lang, "support")
     elif data.startswith("sup:"):
-        target = data.split(":", 1)[1]
-        WAIT[c.message.chat.id] = {"kind": "support", "extra": {"target": target, "user": user}}
+        parts = data.split(":")
+        target = parts[1]
+        shop_id = parts[2] if len(parts) > 2 else None
+        WAIT[c.message.chat.id] = {"kind": "support", "extra": {"target": target, "shop_id": shop_id}}
         bot.send_message(c.message.chat.id, t(lang, "ticket"))
 
 def owner_action(c, user, lang, action):
@@ -1301,7 +1368,8 @@ def owner_action(c, user, lang, action):
         bot.send_message(chat_id, t(lang, "send_plan"))
         expect(chat_id, "add_plan")
     elif action == "support":
-        bot.send_message(chat_id, t(lang, "send_support"))
+        cur = owner_support_id()
+        bot.send_message(chat_id, t(lang, "send_support") + (("\n\n" + ("آیدی فعلی: " if lang == "fa" else "Current: ") + esc(cur)) if cur else ""))
         expect(chat_id, "owner_support", {"user": user})
 
 def seller_action(c, user, lang, action):
@@ -1376,12 +1444,18 @@ def seller_action(c, user, lang, action):
             k.add(types.InlineKeyboardButton(t(lang, "clear_channel"), callback_data=f"cc:{shop['id']}"))
         bot.send_message(chat_id, text, reply_markup=k)
     elif action == "support":
-        bot.send_message(chat_id, t(lang, "send_support"))
+        cur = seller_support_of(my_shop(user["id"])) or (user.get("support_username") or "")
+        bot.send_message(chat_id, t(lang, "send_support") + (("\n\n" + ("آیدی فعلی: " if lang == "fa" else "Current: ") + esc(cur)) if cur else ""))
         expect(chat_id, "seller_support", {"user": user})
 
 def customer_action(c, user, lang, action):
     chat_id = c.message.chat.id
     if action == "shops":
+        if not is_owner(c.from_user.id):
+            missing = gate_channels(c.from_user.id, None)
+            if missing:
+                ask_join(chat_id, lang, missing, None)
+                return
         rows = public_shops()
         if not rows:
             bot.send_message(chat_id, t(lang, "no_shops"))
@@ -1391,10 +1465,18 @@ def customer_action(c, user, lang, action):
             k.add(types.InlineKeyboardButton(shop["title"], callback_data=f"sh:{shop['id']}"))
         bot.send_message(chat_id, t(lang, "shop"), reply_markup=k)
     elif action == "support":
+        shop_id = LAST_SHOP.get(chat_id)
+        shop = shop_by_id(shop_id) if shop_id else None
         k = types.InlineKeyboardMarkup()
-        k.add(types.InlineKeyboardButton(t(lang, "support_seller"), callback_data="sup:seller"))
+        if shop:
+            k.add(types.InlineKeyboardButton(t(lang, "support_seller") + " · " + trunc(shop["title"], 25), callback_data=f"sup:seller:{shop['id']}"))
+        else:
+            # no shop opened yet: let the customer pick which shop the question is about
+            for sh in public_shops()[:20]:
+                k.add(types.InlineKeyboardButton("🏪 " + trunc(sh["title"], 40), callback_data=f"sups:{sh['id']}"))
         k.add(types.InlineKeyboardButton(t(lang, "support_owner"), callback_data="sup:owner"))
-        bot.send_message(chat_id, t(lang, "support"), reply_markup=k)
+        info = shop_support_text(lang, shop) if shop else owner_support_id() and (("👑 پشتیبانی ربات: " if lang == "fa" else "👑 Bot support: ") + esc(owner_support_id()))
+        bot.send_message(chat_id, t(lang, "support") + (("\n\n" + info) if info else ""), reply_markup=k)
 
 def show_shop(chat_id, user, tg_id, shop_id):
     lang = lang_of(user)
@@ -1404,7 +1486,7 @@ def show_shop(chat_id, user, tg_id, shop_id):
         return
     missing = gate_channels(tg_id, shop)
     if missing and role_of(user, tg_id) == "customer":
-        ask_join(chat_id, lang, missing)
+        ask_join(chat_id, lang, missing, shop_id)
         return
     if role_of(user, tg_id) == "customer" and not shop_has_active_sub(shop):
         bot.send_message(chat_id, t(lang, "need_sub"))
@@ -1421,7 +1503,8 @@ def show_shop(chat_id, user, tg_id, shop_id):
         icon = "📦" if is_physical(p) else "💾"
         k.add(types.InlineKeyboardButton(trunc(f"{icon} {pname(lang, p)} — {price}", 60), callback_data=f"pr:{p['id']}"))
     k.add(types.InlineKeyboardButton(t(lang, "back"), callback_data="home"))
-    bot.send_message(chat_id, esc(shop["title"]), reply_markup=k)
+    contacts = shop_support_text(lang, shop)
+    bot.send_message(chat_id, esc(shop["title"]) + (("\n\n" + contacts) if contacts else ""), reply_markup=k)
 
 def show_shop_products_text(chat_id, shop_id, lang="fa"):
     shop = shop_by_id(shop_id)
@@ -1806,7 +1889,7 @@ def on_text(m):
             set_setting("global_channel_username", username)
             bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "owner_support":
-            set_setting("owner_support", text.strip())
+            set_setting("owner_support", text.strip())   # global: shown in every shop
             set_support(user["id"], text.strip())
             bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "create_shop":
@@ -1898,28 +1981,34 @@ def on_text(m):
             set_shop_channel(state["extra"]["shop_id"], channel_id, username)
             bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "seller_support":
-            set_support(user["id"], text.strip())
+            # belongs ONLY to this seller's shop
+            set_support(user["id"], text.strip())   # writes users + this seller's shop only
             bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "support":
             target = state["extra"].get("target")
+            shop_id = state["extra"].get("shop_id") or LAST_SHOP.get(m.chat.id)
+            shop = shop_by_id(shop_id) if shop_id else None
             save_support_message(user["id"], None, target, text)
+            head = f"{t('fa', 'support_from')} {m.from_user.id}"
+            if shop:
+                head += f" · 🏪 {esc(shop['title'])}"
             if target == "owner":
-                dest = get_setting("owner_support")
-                for admin in ADMIN_IDS:
-                    notify(admin, f"{t(lang_of_tg(admin), 'support_from')} {m.from_user.id}\n{esc(text)}")
-                if dest:
-                    bot.send_message(m.chat.id, f"{t(lang, 'sent_owner')} {dest}")
-                else:
-                    bot.send_message(m.chat.id, t(lang, "saved"))
+                # the bot owner receives tickets from every shop
+                for admin in set(list(ADMIN_IDS) + list(owner_ids())):
+                    notify(admin, f"{head}\n{esc(text)}")
+                dest = owner_support_id()
+                bot.send_message(m.chat.id, f"{t(lang, 'sent_owner')} {dest}" if dest else t(lang, "saved"))
             else:
-                shop = shop_by_id(LAST_SHOP.get(m.chat.id)) if LAST_SHOP.get(m.chat.id) else None
                 if not shop:
-                    shops = public_shops()
-                    shop = shops[0] if shops else None
-                if shop:
-                    owner = one("users", {"id": shop["owner_user_id"]})
-                    if owner:
-                        notify(owner["telegram_id"], f"{t(lang_of(owner), 'support_from')} {m.from_user.id}\n{esc(text)}")
+                    bot.send_message(m.chat.id, t(lang, "not_found"))
+                    return
+                owner = one("users", {"id": shop["owner_user_id"]})
+                if owner:
+                    notify(owner["telegram_id"], f"{t(lang_of(owner), 'support_from')} {m.from_user.id} · 🏪 {esc(shop['title'])}\n{esc(text)}")
+                # owner of the bot can see every shop's tickets too
+                for tg in owner_ids():
+                    if not owner or tg != owner["telegram_id"]:
+                        notify(tg, f"{head}\n{esc(text)}")
                 bot.send_message(m.chat.id, t(lang, "saved"))
         elif kind == "receipt":
             submit_receipt(m, state["extra"]["order_id"])
@@ -1991,14 +2080,14 @@ def media_step(m):
         on_text(m)
         return
     relay_deal(m)
-@bot.message_handler(commands=["menu", "panel", "shops", "support"])
+@bot.message_handler(commands=["menu", "panel", "switch", "shops", "support"])
 def menu_commands(m):
     user = get_user(m.from_user)
     WAIT.pop(m.chat.id, None)
     if not user.get("language_set"):
         ask_language(m.chat.id)
         return
-    if m.text.startswith("/panel"):
+    if m.text.startswith("/switch"):
         ask_panel(m.chat.id, lang_of(user), m.from_user.id)
         return
     if gate_onboarding(m, user):
