@@ -7,18 +7,21 @@ import os
 import hmac
 import traceback
 from collections import deque
+from threading import Lock
 
 app = Flask(__name__)
 # Use a dedicated secret for Flask sessions when available. Never fall back to a public default.
 SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
-app.secret_key = SESSION_SECRET or (WEBHOOK_SECRET if WEBHOOK_SECRET and WEBHOOK_SECRET != "change_me" else (ADMIN_PASSWORD or None))
+# Never derive the session-signing key from other credentials.
+app.secret_key = SESSION_SECRET or None
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=True,
 )
 
-SEEN_UPDATES = deque(maxlen=2000)   # Telegram retries on slow replies: never process an update twice
+SEEN_UPDATES = deque(maxlen=2000)   # process-local duplicate optimization
+SEEN_LOCK = Lock()
 
 def ensure_webhook():
     if not BASE_URL:
@@ -52,26 +55,34 @@ def telegram_webhook():
         print("webhook: empty body")
         return "OK", 200
     uid = update.get("update_id")
-    if uid is not None:
-        if uid in SEEN_UPDATES:
+    # Mark only after successful dispatch so transient exceptions are retryable.
+    with SEEN_LOCK:
+        if uid is not None and uid in SEEN_UPDATES:
             return "OK", 200
-        SEEN_UPDATES.append(uid)
     try:
         from telebot.types import Update
-        print("webhook update:", update.get("update_id"), list(update.keys()))
         bot.process_new_updates([Update.de_json(update)])
     except Exception:
         traceback.print_exc()
+        return "temporary processing failure", 500
+    with SEEN_LOCK:
+        if uid is not None:
+            SEEN_UPDATES.append(uid)
     return "OK", 200
 
 @app.get("/admin")
 def admin():
+    if not SESSION_SECRET:
+        return "SESSION_SECRET is not configured", 503
     if not session.get("admin"):
         return redirect(url_for("login"))
     return render_template("admin.html", stats=stats())
 
+
 @app.route("/admin/login", methods=["GET","POST"])
 def login():
+    if not SESSION_SECRET:
+        return "SESSION_SECRET is not configured", 503
     if request.method=="POST":
         # Fail closed if Render's ADMIN_PASSWORD was removed/misspelled; blank must never log in.
         submitted = request.form.get("password", "")
@@ -91,12 +102,16 @@ def logout():
 def admin_daily_stats():
     if not session.get("admin"):
         return jsonify({"error":"unauthorized"}),401
-    rows=table("orders").select("created_at,total,payment_status").eq("payment_status","paid").execute().data
+    rows=table("orders").select("created_at,total,payment_status,currency,payment_method").eq("payment_status","paid").execute().data
     daily={}
     for x in rows:
+        if x.get("currency") == "CUSTOM" or x.get("payment_method") == "custom":
+            continue
         day=x["created_at"][:10]
-        daily[day]=daily.get(day,0)+float(x["total"])
-    return jsonify(sorted([{"date":k,"revenue":v} for k,v in daily.items()], key=lambda x:x["date"]))
+        cur=x.get("currency") or "IRT"
+        key=f"{day}:{cur}"
+        daily[key]=daily.get(key,0)+float(x.get("total") or 0)
+    return jsonify(sorted([{"date":k.rsplit(":",1)[0],"currency":k.rsplit(":",1)[1],"revenue":v} for k,v in daily.items()], key=lambda x:(x["date"],x["currency"])))
 
 @app.get("/admin/products")
 def admin_products():
