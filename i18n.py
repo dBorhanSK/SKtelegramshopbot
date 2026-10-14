@@ -659,3 +659,58 @@ def fmt_date(lang, value, with_time=True):
         return s.translate(_FA_DIGITS)
     d = d.astimezone(_tz.utc)
     return d.strftime("%Y-%m-%d") + (d.strftime(" %H:%M UTC") if with_time else "")
+
+
+# ---------------- admin subscriptions + collapsible menu ----------------
+TEXT["fa"].update({
+    "close_menu": "❌ بستن منو",
+    "menu_open": "📋 منو باز شد. هر وقت نخواستید «❌ بستن منو» را بزنید؛ با /menu دوباره باز می‌شود.",
+    "menu_closed": "منو بسته شد. برای باز کردن دوباره /menu را بفرستید.",
+    "sub_exempt": "دسترسی دائمی (بدون نیاز به اشتراک)",
+    "admins_hint": "برای مدیریت اشتراک هر ادمین روی نام او بزنید.\n⭐ اشتراک فعال · ♾ بدون اشتراک · ⛔ منقضی/بدون اشتراک",
+    "adm_status_exempt": "♾ دسترسی دائمی (بدون اشتراک)",
+    "adm_status_active": "⭐ اشتراک فعال تا",
+    "adm_status_expired": "⛔ بدون اشتراک فعال (دسترسی قطع است)",
+    "adm_id": "آیدی عددی",
+    "adm_days_btn": "➕ {n} روز",
+    "adm_custom_days": "✏️ تعداد روز دلخواه",
+    "adm_cancel_sub": "⛔ لغو اشتراک",
+    "adm_exempt_on": "♾ بدون نیاز به اشتراک",
+    "adm_exempt_off": "🔒 نیازمند اشتراک کن",
+    "adm_remove": "❌ حذف ادمین",
+    "ask_days": "تعداد روز اشتراک را بفرستید (۱ تا ۳۶۵۰).",
+    "bad_days": "عدد نامعتبر است.",
+    "bad_id": "آیدی عددی نامعتبر است.",
+    "admin_added_ok": "✅ ادمین اضافه شد. بدون نیاز به اشتراک دسترسی کامل دارد.",
+    "sub_granted": "✅ اشتراک ادمین شما تا {date} فعال شد.",
+    "sub_revoked": "⛔ اشتراک شما لغو شد و دسترسی ادمین قطع است. برای ادامه اشتراک بخرید.",
+    "admin_appointed": "✅ شما ادمین شدید و برای دسترسی نیازی به خرید اشتراک ندارید.",
+    "admin_removed": "⛔ دسترسی ادمین شما برداشته شد.",
+    "exempt_off_note": "⚠️ دسترسی شما از این به بعد به اشتراک وابسته است.",
+})
+TEXT["en"].update({
+    "close_menu": "❌ Close menu",
+    "menu_open": "📋 Menu is open. Tap “❌ Close menu” whenever you don't need it; /menu opens it again.",
+    "menu_closed": "Menu closed. Send /menu to open it again.",
+    "sub_exempt": "Permanent access (no subscription needed)",
+    "admins_hint": "Tap an admin to manage their subscription.\n⭐ active · ♾ no subscription needed · ⛔ expired/none",
+    "adm_status_exempt": "♾ Permanent access (no subscription)",
+    "adm_status_active": "⭐ Subscription active until",
+    "adm_status_expired": "⛔ No active subscription (access is off)",
+    "adm_id": "Numeric ID",
+    "adm_days_btn": "➕ {n} days",
+    "adm_custom_days": "✏️ Custom number of days",
+    "adm_cancel_sub": "⛔ Cancel subscription",
+    "adm_exempt_on": "♾ Exempt from subscription",
+    "adm_exempt_off": "🔒 Require a subscription",
+    "adm_remove": "❌ Remove admin",
+    "ask_days": "Send the number of subscription days (1 to 3650).",
+    "bad_days": "Invalid number.",
+    "bad_id": "Invalid numeric ID.",
+    "admin_added_ok": "✅ Admin added. Full access without a subscription.",
+    "sub_granted": "✅ Your admin subscription is active until {date}.",
+    "sub_revoked": "⛔ Your subscription was cancelled and admin access is off. Buy a plan to continue.",
+    "admin_appointed": "✅ You are now an admin and need no subscription.",
+    "admin_removed": "⛔ Your admin access was removed.",
+    "exempt_off_note": "⚠️ Your access now depends on a subscription.",
+})
