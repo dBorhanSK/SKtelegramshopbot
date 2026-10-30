@@ -6,8 +6,10 @@ from db import table
 import os
 import hmac
 import traceback
+import time
+import requests
 from collections import deque
-from threading import Lock
+from threading import Lock, Thread
 
 app = Flask(__name__)
 # Use a dedicated secret for Flask sessions when available. Never fall back to a public default.
@@ -20,19 +22,101 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-SEEN_UPDATES = deque(maxlen=2000)   # process-local duplicate optimization
+# Single Gunicorn worker is intentional: this bounded in-memory dedupe cache
+# is shared by all gthread request threads in the process.
+SEEN_UPDATES = deque()
+SEEN_UPDATE_IDS = set()
 SEEN_LOCK = Lock()
 
+AUTO_SET_WEBHOOK = os.getenv("AUTO_SET_WEBHOOK", "1").strip().lower() not in ("0", "false", "no", "off")
+KEEPALIVE_ENABLED = os.getenv("KEEPALIVE", "1").strip().lower() not in ("0", "false", "no", "off")
+try:
+    KEEPALIVE_SECONDS = max(300, min(840, int(os.getenv("KEEPALIVE_SECONDS", "540"))))
+except ValueError:
+    KEEPALIVE_SECONDS = 540
+
+
+def _remember_update(update_id):
+    """Atomically claim an update id so concurrent Telegram retries are not dispatched twice."""
+    if update_id is None:
+        return True
+    with SEEN_LOCK:
+        if update_id in SEEN_UPDATE_IDS:
+            return False
+        SEEN_UPDATE_IDS.add(update_id)
+        SEEN_UPDATES.append(update_id)
+        if len(SEEN_UPDATES) > 2000:
+            expired = SEEN_UPDATES.popleft()
+            SEEN_UPDATE_IDS.discard(expired)
+        return True
+
+
+def _forget_update(update_id):
+    """Allow Telegram to retry an update when dispatch itself fails."""
+    if update_id is None:
+        return
+    with SEEN_LOCK:
+        SEEN_UPDATE_IDS.discard(update_id)
+        try:
+            SEEN_UPDATES.remove(update_id)
+        except ValueError:
+            pass
+
+
 def ensure_webhook():
+    if not AUTO_SET_WEBHOOK:
+        print("Automatic webhook setup disabled")
+        return False
     if not BASE_URL:
         print("Webhook skipped: BASE_URL is empty")
-        return
+        return False
+    if not WEBHOOK_SECRET or WEBHOOK_SECRET == "change_me":
+        print("Webhook skipped: WEBHOOK_SECRET is missing or still the default")
+        return False
     try:
         url = f"{BASE_URL}/telegram-webhook"
         result = bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET)
         print("Webhook set:", url, result)
-    except Exception as e:
-        print("Webhook setup:", e)
+        return bool(result)
+    except Exception:
+        traceback.print_exc()
+        print("Webhook setup failed; background retry will continue")
+        return False
+
+
+def _webhook_retry_loop():
+    """Retry automatic webhook registration after transient startup/network failures."""
+    delay = 5
+    while True:
+        time.sleep(delay)
+        if ensure_webhook():
+            print("Webhook registration retry succeeded")
+            return
+        delay = min(delay * 2, 120)
+
+
+def _keepalive_loop():
+    """Best-effort self-ping to /health before Render Free's 15-minute idle window."""
+    while True:
+        time.sleep(KEEPALIVE_SECONDS)
+        try:
+            response = requests.get(f"{BASE_URL}/health", timeout=(3, 8))
+            if response.status_code == 200:
+                print(f"Keep-alive OK ({response.status_code})")
+            else:
+                print(f"Keep-alive returned HTTP {response.status_code}")
+        except Exception as e:
+            print(f"Keep-alive request failed: {e}")
+
+
+def start_background_tasks():
+    # With render.yaml's single Gunicorn worker, these loops start exactly once.
+    if BASE_URL and AUTO_SET_WEBHOOK:
+        if not ensure_webhook():
+            Thread(target=_webhook_retry_loop, name="webhook-retry", daemon=True).start()
+    if BASE_URL and KEEPALIVE_ENABLED:
+        Thread(target=_keepalive_loop, name="render-keepalive", daemon=True).start()
+        print(f"Keep-alive enabled: interval={KEEPALIVE_SECONDS}s")
 
 @app.get("/")
 def home():
@@ -55,19 +139,17 @@ def telegram_webhook():
         print("webhook: empty body")
         return "OK", 200
     uid = update.get("update_id")
-    # Mark only after successful dispatch so transient exceptions are retryable.
-    with SEEN_LOCK:
-        if uid is not None and uid in SEEN_UPDATES:
-            return "OK", 200
+    if not _remember_update(uid):
+        return "OK", 200
     try:
         from telebot.types import Update
+        # TeleBot is configured with a worker pool in bot.py. This call dispatches
+        # handlers without forcing this Flask request to execute the full business flow.
         bot.process_new_updates([Update.de_json(update)])
     except Exception:
+        _forget_update(uid)
         traceback.print_exc()
         return "temporary processing failure", 500
-    with SEEN_LOCK:
-        if uid is not None:
-            SEEN_UPDATES.append(uid)
     return "OK", 200
 
 @app.get("/admin")
@@ -145,7 +227,7 @@ def set_webhook():
     result=bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET)
     return jsonify({"webhook":url,"result":result})
 
-ensure_webhook()
+start_background_tasks()
 
 if __name__=="__main__":
     port = int(os.getenv("PORT", "10000"))
