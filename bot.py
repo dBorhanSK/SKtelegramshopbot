@@ -1,6 +1,7 @@
 import html
 import json
 import re
+import os
 from datetime import datetime, timezone
 
 import telebot
@@ -11,7 +12,14 @@ from services import *
 from payments import stars_amount
 from db import table, one
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+try:
+    BOT_HANDLER_THREADS = max(2, min(8, int(os.getenv("BOT_HANDLER_THREADS", "4"))))
+except ValueError:
+    BOT_HANDLER_THREADS = 4
+
+# Handler pool keeps webhook dispatch quick and lets independent customers be
+# served concurrently. The upper bound prevents excessive database contention.
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True, num_threads=BOT_HANDLER_THREADS)
 
 
 class PersistentWait(dict):
