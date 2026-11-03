@@ -18,8 +18,10 @@ try:
 except ValueError:
     BOT_HANDLER_THREADS = 4
 
-# Handler pool keeps webhook dispatch quick and lets independent customers be
-# served concurrently. The upper bound prevents excessive database contention.
+# Gunicorn gthread provides concurrency at the HTTP layer. TeleBot is kept
+# synchronous so each webhook update completes its registered handler before
+# Telegram receives HTTP 200; this avoids callbacks getting stranded in a second
+# internal worker pool. Set Gunicorn threads to 8 for concurrent webhook requests.
 
 import sys
 
@@ -33,7 +35,7 @@ def _handler_exception(exception):
 bot = telebot.TeleBot(
     BOT_TOKEN,
     parse_mode="HTML",
-    threaded=True,
+    threaded=False,
     num_threads=BOT_HANDLER_THREADS,
     exception_handler=_handler_exception,
 )
