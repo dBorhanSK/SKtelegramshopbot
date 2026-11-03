@@ -20,8 +20,23 @@ except ValueError:
 
 # Handler pool keeps webhook dispatch quick and lets independent customers be
 # served concurrently. The upper bound prevents excessive database contention.
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True, num_threads=BOT_HANDLER_THREADS)
 
+import sys
+
+def _handler_exception(exception):
+    """Called by telebot when a handler raises. Prints to stdout with flush so
+    Render logs capture it."""
+    import traceback
+    print(f"[BOT HANDLER EXCEPTION] {type(exception).__name__}: {exception}", flush=True)
+    traceback.print_exc(file=sys.stdout)
+
+bot = telebot.TeleBot(
+    BOT_TOKEN,
+    parse_mode="HTML",
+    threaded=True,
+    num_threads=BOT_HANDLER_THREADS,
+    exception_handler=_handler_exception,
+)
 
 class PersistentWait(dict):
     """Same dict API the bot already uses (WAIT[chat] = {...}, WAIT.pop, `in`), but every
