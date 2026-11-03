@@ -305,10 +305,10 @@ def telegram_webhook():
         # Decode using the library's JSON-string deserializer.
         update_obj = Update.de_json(json.dumps(update, ensure_ascii=False))
 
-        # Dispatch /start directly in the request thread. This guarantees that the
-        # onboarding handler actually runs before acknowledging the update, and makes
-        # any DB/Telegram API failure visible in Render logs. Other updates continue
-        # through TeleBot's normal threaded dispatcher for throughput.
+        # /start stays direct so onboarding failures are visible. All other update
+        # types pass through TeleBot's registered handlers. bot.py sets threaded=False,
+        # so callbacks, reply-keyboard text and payment updates complete in this
+        # Gunicorn request thread before the webhook is acknowledged.
         message = getattr(update_obj, "message", None)
         message_text = (getattr(message, "text", None) or "").strip()
         first_token = message_text.split(maxsplit=1)[0] if message_text else ""
@@ -323,7 +323,7 @@ def telegram_webhook():
             print(f"[WEBHOOK] /start handler completed update_id={uid}", flush=True)
         else:
             bot.process_new_updates([update_obj])
-            print(f"[WEBHOOK] update queued to bot handlers update_id={uid}", flush=True)
+            print(f"[WEBHOOK] update handler completed update_id={uid}", flush=True)
     except Exception:
         _forget_update(uid)
         print(f"[WEBHOOK] dispatch failed update_id={uid}", flush=True)
