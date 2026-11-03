@@ -3,6 +3,7 @@ import json
 import re
 import os
 from datetime import datetime, timezone
+from threading import Thread
 
 import telebot
 from telebot import types
@@ -2422,112 +2423,4 @@ def menu_commands(m):
     send_home(m.chat.id, user, m.from_user.id)
 
 class Click:
-    def __init__(self, message):
-        self.message = message
-        self.from_user = message.from_user
-        self.id = "0"
-        self.data = ""
-
-MENU_KEYS = ("owner_btn", "admin_btn", "switch_panel", "income_btn", "shop", "shops", "channels", "channels_btn", "plans", "plans_btn", "my_sub_btn", "my_shop_btn", "products_btn", "my_channel_btn", "cart", "orders", "support", "language", "manage_orders_btn", "admins", "admin_stats", "my_support", "pay_method")
-
-def is_exact_menu_text(text):
-    """Only the real keyboard buttons. Used while a form is open, so a review or an
-    address that merely contains the word 'orders' can't hijack the form."""
-    return (text or "").strip() in labels(*MENU_KEYS)
-
-def is_menu_text(text):
-    raw = (text or "").strip()
-    if is_exact_menu_text(raw):
-        return True
-    folded = raw.replace("🛍", "").replace("📦", "").replace("🛒", "").replace("🎫", "").replace("🌐", "").replace("⭐", "").replace("📣", "").replace("📊", "").replace("👑", "").replace("🏪", "").replace("🔁", "").strip()
-    keys = ("فروشگاه من", "محصولات", "اشتراک من", "کانال من", "سبد خرید", "سفارش", "پشتیبانی", "زبان", "درآمد", "کانال", "تغییر پنل", "مدیریت سفارش", "My shop", "Products", "My subscription", "My channel", "Cart", "Orders", "Support", "Language", "Revenue", "Shops", "Switch panel")
-    return any(k.lower() in folded.lower() for k in keys)
-
-def handle_menu(m):
-    try:
-        bot.clear_step_handler_by_chat_id(m.chat.id)
-    except Exception:
-        pass
-    WAIT.pop(m.chat.id, None)
-    user = get_user(m.from_user)
-    lang = lang_of(user)
-    text = m.text or ""
-    folded = text.replace("🛍", "").replace("📦", "").replace("🛒", "").replace("🎫", "").replace("🌐", "").replace("⭐", "").replace("📣", "").replace("📊", "").replace("👑", "").replace("🏪", "").replace("🔁", "").strip().lower()
-    fake = Click(m)
-    if text in labels("owner_btn", "admin_btn") or folded in ("پنل مالک", "پنل ادمین", "owner panel", "admin panel"):
-        send_home(m.chat.id, user, m.from_user.id)
-    elif text in labels("manage_orders_btn") or "مدیریت سفارش" in folded or "manage orders" in folded:
-        show_manage_orders(m.chat.id, user, m.from_user.id, lang)
-    elif text in labels("switch_panel") or "تغییر پنل" in folded or "switch panel" in folded:
-        ask_panel(m.chat.id, lang, m.from_user.id)
-    elif text in labels("income_btn") or folded in ("درآمد", "revenue"):
-        owner_action(fake, user, lang, "revenue")
-    elif text in labels("my_shop_btn") or "فروشگاه من" in folded or "my shop" in folded:
-        seller_action(fake, user, lang, "shop")
-    elif text in labels("shop", "shops") or folded in ("فروشگاه‌ها", "فروشگاه ها", "shops"):
-        if is_owner(m.from_user.id):
-            owner_action(fake, user, lang, "shops")
-        else:
-            customer_action(fake, user, lang, "shops")
-    elif text in labels("channels_btn", "channels") or folded in ("کانال‌ها", "کانال ها", "channels"):
-        owner_action(fake, user, lang, "channels")
-    elif text in labels("plans_btn", "plans") or folded in ("اشتراک‌ها", "اشتراک ها", "plans"):
-        owner_action(fake, user, lang, "plans")
-    elif text in labels("admins") or "ادمین" in folded or "admins" in folded:
-        owner_action(fake, user, lang, "admins")
-    elif text in labels("admin_stats") or "آمار" in folded or "stats" in folded:
-        owner_action(fake, user, lang, "stats")
-    elif text in labels("my_support") or "پشتیبانی من" in folded or "my support" in folded or "support id" in folded:
-        if is_owner(m.from_user.id):
-            owner_action(fake, user, lang, "support")
-        else:
-            seller_action(fake, user, lang, "support")
-    elif text in labels("pay_method") or "شیوه" in folded or "method" in folded or "sales method" in folded:
-        seller_action(fake, user, lang, "method")
-    elif text in labels("my_sub_btn") or "اشتراک من" in folded or "my subscription" in folded:
-        seller_action(fake, user, lang, "sub")
-    elif text in labels("products_btn") or folded in ("محصولات", "products"):
-        seller_action(fake, user, lang, "products")
-    elif text in labels("my_channel_btn") or "کانال من" in folded or "my channel" in folded:
-        seller_action(fake, user, lang, "channel")
-    elif text in labels("cart") or "سبد" in folded or folded == "cart":
-        show_cart(m.chat.id, user, lang)
-    elif text in labels("orders") or "سفارش" in folded or "orders" in folded:
-        show_orders(m.chat.id, user)
-    elif text in labels("support") or "پشتیبانی" in folded or folded == "support":
-        customer_action(fake, user, lang, "support")
-    elif text in labels("language") or folded in ("زبان", "language"):
-        ask_language(m.chat.id)
-    else:
-        bot.send_message(m.chat.id, t(lang, "choose"))
-
-@bot.message_handler(func=lambda m: m.content_type == "text" and not (m.text or "").startswith("/"))
-def menu_text(m):
-    try:
-        if (m.text or "").strip() in labels("close_menu"):
-            close_reply_keyboard(m)
-            return
-        user = get_user(m.from_user)
-        if m.chat.id in WAIT:
-            if is_exact_menu_text(m.text or ""):
-                handle_menu(m)
-            else:
-                on_text(m)
-            return
-        if gate_onboarding(m, user):            # language first, then panel
-            return
-        if is_menu_text(m.text or ""):
-            handle_menu(m)
-            return
-        if relay_deal(m):
-            return
-        handle_menu(m)
-    except Exception as e:
-        print("menu failed:", e)
-        try:
-            bot.send_message(m.chat.id, t("fa", "err_generic") + "\n" + t("en", "err_generic"))
-        except Exception:
-            pass
-
-setup_commands()
-
+    def __init
