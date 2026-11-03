@@ -33,6 +33,11 @@ SEEN_LOCK = Lock()
 
 AUTO_SET_WEBHOOK = os.getenv("AUTO_SET_WEBHOOK", "1").strip().lower() not in ("0", "false", "no", "off")
 KEEPALIVE_ENABLED = os.getenv("KEEPALIVE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+# Explicitly set the update types this bot actually handles. Telegram preserves
+# the previous allowed_updates filter when this argument is omitted; an old
+# filter can silently prevent /start messages from reaching this webhook.
+WEBHOOK_ALLOWED_UPDATES = ["message", "callback_query", "pre_checkout_query"]
 try:
     KEEPALIVE_SECONDS = max(300, min(840, int(os.getenv("KEEPALIVE_SECONDS", "540"))))
 except ValueError:
@@ -76,9 +81,25 @@ def ensure_webhook():
         return False
     try:
         url = f"{BASE_URL}/telegram-webhook"
-        result = bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET)
-        print(f"Webhook set: {url} result={result}", flush=True)
-        return bool(result)
+        result = bot.set_webhook(
+            url=url,
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=WEBHOOK_ALLOWED_UPDATES,
+            max_connections=40,
+            drop_pending_updates=False,
+        )
+        info = bot.get_webhook_info()
+        current_url = (getattr(info, "url", "") or "").rstrip("/")
+        matches = current_url == url.rstrip("/")
+        print(
+            "Webhook registration: "
+            f"set_result={result} url_matches={matches} "
+            f"current_url={current_url or '(empty)'} "
+            f"pending={getattr(info, 'pending_update_count', 'unknown')} "
+            f"allowed_updates={WEBHOOK_ALLOWED_UPDATES}",
+            flush=True,
+        )
+        return bool(result and matches)
     except Exception:
         traceback.print_exc()
         print("Webhook setup failed; background retry will continue", flush=True)
@@ -148,24 +169,42 @@ def health():
 def diag():
     """Read-only diagnostic: shows what env vars are loaded and Telegram's view of our webhook."""
     wh_info = None
+    bot_info = None
     try:
-        info = bot.get_webhook_info()
-        wh_info = {
-            "url": info.url,
-            "pending_updates": info.pending_update_count,
-            "last_error": info.last_error_message,
-            "last_error_date": getattr(info, "last_error_date", None),
+        me = bot.get_me()
+        bot_info = {
+            "id": getattr(me, "id", None),
+            "username": getattr(me, "username", None),
+            "first_name": getattr(me, "first_name", None),
         }
     except Exception as e:
-        wh_info = {"error": str(e)}
+        bot_info = {"error_type": type(e).__name__}
+    try:
+        info = bot.get_webhook_info()
+        actual_url = (getattr(info, "url", "") or "").rstrip("/")
+        expected_url = f"{BASE_URL}/telegram-webhook".rstrip("/") if BASE_URL else ""
+        last_error_date = getattr(info, "last_error_date", None)
+        if hasattr(last_error_date, "isoformat"):
+            last_error_date = last_error_date.isoformat()
+        wh_info = {
+            "url": actual_url,
+            "url_matches_expected": bool(actual_url and actual_url == expected_url),
+            "pending_updates": info.pending_update_count,
+            "last_error": info.last_error_message,
+            "last_error_date": last_error_date,
+        }
+    except Exception as e:
+        wh_info = {"error_type": type(e).__name__}
     return jsonify({
         "base_url": BASE_URL,
+        "bot": bot_info,
         "auto_webhook": AUTO_SET_WEBHOOK,
         "keepalive": KEEPALIVE_ENABLED,
         "keepalive_seconds": KEEPALIVE_SECONDS,
         "secret_present": bool(WEBHOOK_SECRET),
         "secret_is_default": WEBHOOK_SECRET == "change_me",
         "secret_len": len(WEBHOOK_SECRET or ""),
+        "allowed_updates_configured": WEBHOOK_ALLOWED_UPDATES,
         "telegram_webhook_info": wh_info,
         "expected_webhook_url": f"{BASE_URL}/telegram-webhook" if BASE_URL else None,
     })
@@ -207,12 +246,21 @@ def force_set_webhook():
         }), 400
     url = f"{BASE_URL}/telegram-webhook"
     try:
-        result = bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET)
+        result = bot.set_webhook(
+            url=url,
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=WEBHOOK_ALLOWED_UPDATES,
+            max_connections=40,
+            drop_pending_updates=False,
+        )
         info = bot.get_webhook_info()
+        current_url = (getattr(info, "url", "") or "").rstrip("/")
         return jsonify({
             "set_result": result,
             "requested_url": url,
-            "current_url": info.url,
+            "current_url": current_url,
+            "url_matches": current_url == url.rstrip("/"),
+            "allowed_updates": WEBHOOK_ALLOWED_UPDATES,
             "pending": info.pending_update_count,
             "last_error": info.last_error_message,
         })
@@ -242,8 +290,14 @@ def telegram_webhook():
     update = request.get_json(force=True, silent=True)
     if not update:
         return "OK", 200
+    if not isinstance(update, dict):
+        print("webhook received a non-object JSON payload", flush=True)
+        return "bad update payload", 400
     uid = update.get("update_id")
+    update_kinds = [k for k in ("message", "callback_query", "pre_checkout_query", "edited_message") if k in update]
+    print(f"Webhook received update_id={uid} types={update_kinds or ['unknown']}", flush=True)
     if not _remember_update(uid):
+        print(f"Webhook duplicate ignored update_id={uid}", flush=True)
         return "OK", 200
     try:
         from telebot.types import Update
