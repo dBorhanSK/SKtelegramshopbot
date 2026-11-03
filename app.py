@@ -170,7 +170,27 @@ def diag():
         "expected_webhook_url": f"{BASE_URL}/telegram-webhook" if BASE_URL else None,
     })
 
-
+@app.post("/test-send")
+def test_send():
+    """Send a test message directly to a chat_id (bypasses webhook).
+    Use this to check whether bot.send_message works at all."""
+    chat_id = request.args.get("chat_id", "").strip()
+    if not chat_id:
+        return jsonify({"error": "chat_id query param required"}), 400
+    try:
+        result = bot.send_message(int(chat_id), "🧪 Test message from server (bypassing webhook)")
+        return jsonify({
+            "ok": bool(result),
+            "message_id": getattr(result, "message_id", None),
+            "chat_id": int(chat_id),
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({
+            "error": str(e),
+            "type": type(e).__name__,
+        }), 500
+        
 @app.post("/force-set-webhook")
 def force_set_webhook():
     """Manually register the webhook with Telegram. Use this if the auto-bootstrap
