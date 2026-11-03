@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
-from bot import bot
+from bot import bot, start as start_handler
 from config import WEBHOOK_SECRET, ADMIN_PASSWORD
 import config as _cfg
 from services import stats, is_admin
 from db import table
 import os
+import json
 import hmac
 import traceback
 import time
@@ -301,9 +302,31 @@ def telegram_webhook():
         return "OK", 200
     try:
         from telebot.types import Update
-        bot.process_new_updates([Update.de_json(update)])
+        # Decode using the library's JSON-string deserializer.
+        update_obj = Update.de_json(json.dumps(update, ensure_ascii=False))
+
+        # Dispatch /start directly in the request thread. This guarantees that the
+        # onboarding handler actually runs before acknowledging the update, and makes
+        # any DB/Telegram API failure visible in Render logs. Other updates continue
+        # through TeleBot's normal threaded dispatcher for throughput.
+        message = getattr(update_obj, "message", None)
+        message_text = (getattr(message, "text", None) or "").strip()
+        first_token = message_text.split(maxsplit=1)[0] if message_text else ""
+        command = first_token.split("@", 1)[0].lower()
+        if message is not None and command == "/start":
+            print(
+                f"[WEBHOOK] direct /start dispatch chat_id={getattr(getattr(message, 'chat', None), 'id', None)} "
+                f"user_id={getattr(getattr(message, 'from_user', None), 'id', None)}",
+                flush=True,
+            )
+            start_handler(message)
+            print(f"[WEBHOOK] /start handler completed update_id={uid}", flush=True)
+        else:
+            bot.process_new_updates([update_obj])
+            print(f"[WEBHOOK] update queued to bot handlers update_id={uid}", flush=True)
     except Exception:
         _forget_update(uid)
+        print(f"[WEBHOOK] dispatch failed update_id={uid}", flush=True)
         traceback.print_exc()
         return "temporary processing failure", 500
     return "OK", 200
